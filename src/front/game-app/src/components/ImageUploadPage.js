@@ -6,17 +6,18 @@ function ImageUploadPage({ onNavigate, sessionId, uploadedImages, setUploadedIma
   const [isLoading, setIsLoading] = useState(false);
   const MAX_IMAGES = 5;
 
+
   // 테스트 모드로 게임 시작
   const handleTestMode = () => {
     // 테스트용 Mock 이미지 데이터
     const mockImageData = [
       {
-        original: 'https://via.placeholder.com/800x600/FF6B6B/FFFFFF?text=Original+Image+1',
-        modified: 'https://via.placeholder.com/800x600/4ECDC4/FFFFFF?text=Modified+Image+1'
+        original: 'https://images.pexels.com/photos/19142741/pexels-photo-19142741.jpeg',
+        modified: 'https://images.pexels.com/photos/18232621/pexels-photo-18232621.jpeg'
       },
       {
-        original: 'https://via.placeholder.com/800x600/95E1D3/000000?text=Original+Image+2',
-        modified: 'https://via.placeholder.com/800x600/F38181/FFFFFF?text=Modified+Image+2'
+        original: 'https://images.pexels.com/photos/34622523/pexels-photo-34622523.jpeg',
+        modified: 'https://images.pexels.com/photos/17378214/pexels-photo-17378214.jpeg'
       }
     ];
 
@@ -27,6 +28,81 @@ function ImageUploadPage({ onNavigate, sessionId, uploadedImages, setUploadedIma
     setTimeout(() => {
       onNavigate('game');
     }, 100);
+  };
+
+  // IndexedDB에 이미지 저장 (개발 환경용)
+  const saveToIndexedDB = async (file, index) => {
+    return new Promise((resolve, reject) => {
+      // 먼저 파일을 읽어서 Base64로 변환
+      const reader = new FileReader();
+      
+      reader.onload = () => {
+        const base64Data = reader.result;
+        
+        // 파일을 읽은 후 IndexedDB에 저장
+        const request = indexedDB.open('HiddenCatchDB', 1);
+        
+        request.onerror = () => reject(request.error);
+        
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains('images')) {
+            db.createObjectStore('images', { keyPath: 'id' });
+          }
+        };
+        
+        request.onsuccess = (event) => {
+          const db = event.target.result;
+          const transaction = db.transaction(['images'], 'readwrite');
+          const store = transaction.objectStore('images');
+          
+          const imageData = {
+            id: `${sessionId}_${Date.now()}_${index}_${Math.random()}`,
+            original: base64Data,
+            modified: base64Data, // 개발 환경에서는 같은 이미지 사용
+            timestamp: new Date().toISOString()
+          };
+          
+          const addRequest = store.add(imageData);
+          addRequest.onsuccess = () => {
+            db.close();
+            resolve(imageData);
+          };
+          addRequest.onerror = () => {
+            db.close();
+            reject(addRequest.error);
+          };
+        };
+      };
+      
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  // IndexedDB에서 이미지 불러오기
+  const loadFromIndexedDB = async () => {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open('HiddenCatchDB', 1);
+      
+      request.onerror = () => reject(request.error);
+      
+      request.onsuccess = (event) => {
+        const db = event.target.result;
+        const transaction = db.transaction(['images'], 'readonly');
+        const store = transaction.objectStore('images');
+        const getAllRequest = store.getAll();
+        
+        getAllRequest.onsuccess = () => {
+          const images = getAllRequest.result.map(img => ({
+            original: img.original,
+            modified: img.modified
+          }));
+          resolve(images);
+        };
+        getAllRequest.onerror = () => reject(getAllRequest.error);
+      };
+    });
   };
 
   // 이미지 파일 검증
@@ -67,33 +143,68 @@ function ImageUploadPage({ onNavigate, sessionId, uploadedImages, setUploadedIma
       reader.readAsDataURL(file);
     }
 
-    // 서버로 이미지 업로드
+    // 서버로 이미지 업로드 또는 로컬 저장
     try {
-      const formData = new FormData();
-      validFiles.forEach((file, index) => {
-        formData.append('images', file);
-      });
-      formData.append('sessionId', sessionId);
-
-      // TODO: 실제 서버 엔드포인트로 변경 필요
-      const response = await fetch('/api/upload-images', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        // 서버로부터 받은 데이터: { images: [{original: url, modified: url}, ...] }
-        setImageData(data.images);
-        setUploadedImages([...uploadedImages, ...validFiles]);
+      const isDevelopment = process.env.REACT_APP_TEST_MODE_ENABLED === 'true';
+      
+      if (isDevelopment) {
+        // 개발 환경: IndexedDB에 저장
+        console.log('개발 환경: IndexedDB에 이미지 저장');
+        const savedImages = [];
         
-        // 첫 번째 이미지 데이터 미리 로드
-        if (data.images.length > 0) {
-          preloadImage(data.images[0].original);
-          preloadImage(data.images[0].modified);
+        for (let i = 0; i < validFiles.length; i++) {
+          try {
+            const savedImage = await saveToIndexedDB(validFiles[i], i);
+            savedImages.push({
+              original: savedImage.original,
+              modified: savedImage.modified
+            });
+          } catch (error) {
+            console.error('IndexedDB 저장 실패:', error);
+          }
+        }
+        
+        if (savedImages.length > 0) {
+          setImageData([...imageData || [], ...savedImages]);
+          setUploadedImages([...uploadedImages, ...validFiles]);
+          
+          // 첫 번째 이미지 데이터 미리 로드
+          if (savedImages.length > 0) {
+            preloadImage(savedImages[0].original);
+            preloadImage(savedImages[0].modified);
+          }
+          
+          alert(`${savedImages.length}개 이미지가 브라우저 저장소에 저장되었습니다.`);
         }
       } else {
-        alert('이미지 업로드에 실패했습니다.');
+        // 프로덕션 환경: 서버로 업로드
+        console.log('프로덕션 환경: 서버로 이미지 업로드');
+        const formData = new FormData();
+        validFiles.forEach((file, index) => {
+          formData.append('images', file);
+        });
+        formData.append('sessionId', sessionId);
+
+        // TODO: 실제 서버 엔드포인트로 변경 필요
+        const response = await fetch('/api/upload-images', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // 서버로부터 받은 데이터: { images: [{original: url, modified: url}, ...] }
+          setImageData(data.images);
+          setUploadedImages([...uploadedImages, ...validFiles]);
+          
+          // 첫 번째 이미지 데이터 미리 로드
+          if (data.images.length > 0) {
+            preloadImage(data.images[0].original);
+            preloadImage(data.images[0].modified);
+          }
+        } else {
+          alert('이미지 업로드에 실패했습니다.');
+        }
       }
     } catch (error) {
       console.error('업로드 에러:', error);

@@ -17,6 +17,12 @@
   margin: 0;
   font-size: 28px;
   font-weight: bold;
+  cursor: pointer;
+  transition: color 0.3s;
+}
+
+.header-title:hover h1 {
+  color: #3498db;
 }
 
 .header-nav {

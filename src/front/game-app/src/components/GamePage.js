@@ -5,10 +5,12 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(180); // 3분 = 180초
   const [correctAnswers, setCorrectAnswers] = useState([]); // [{x, y}, ...]
+  const [wrongAnswers, setWrongAnswers] = useState([]); // 오답 좌표 [{x, y}, ...]
   const [gameRoomId, setGameRoomId] = useState(null);
   const [isGameOver, setIsGameOver] = useState(false);
   const [userScore, setUserScore] = useState(0);
   const [isWaiting, setIsWaiting] = useState(false);
+  const [lives, setLives] = useState(10); // 목숨
   
   const originalImageRef = useRef(null);
   const modifiedImageRef = useRef(null);
@@ -30,7 +32,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     ]
   ];
 
-  // 테스트 모드 클릭 핸들러
+  // 테스트 모드 클릭 핸들러 (목숨은 handleImageClick에서 이미 차감됨)
   const handleTestModeClick = (x, y) => {
     const currentMockAnswers = mockAnswers[currentImageIndex] || [];
     const tolerance = 0.1; // 10% 오차 허용
@@ -64,7 +66,9 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
             // 다음 이미지로
             setCurrentImageIndex(currentImageIndex + 1);
             setCorrectAnswers([]);
+            setWrongAnswers([]);
             setTimeLeft(180);
+            setLives(10);
           } else {
             // 게임 종료
             setUserScore(newCorrectAnswers.length * 1000 + Math.floor(timeLeft * 10));
@@ -74,7 +78,14 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
         }, 1000);
       }
     } else {
-      console.log('오답입니다.');
+      console.log('오답입니다. 남은 목숨:', lives);
+      // 오답 표시 추가
+      const wrongCoord = { x, y };
+      setWrongAnswers([...wrongAnswers, wrongCoord]);
+      // 1초 후 X표시 제거
+      setTimeout(() => {
+        setWrongAnswers(prev => prev.filter(coord => coord.x !== x || coord.y !== y));
+      }, 1000);
     }
   };
 
@@ -157,12 +168,40 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
 
     console.log(`클릭 좌표: (${x}, ${y}), 시각: ${clickTime}`);
 
+    // 목숨 차감
+    const newLives = lives - 1;
+    setLives(newLives);
+
+    // 목숨이 0이 되면 게임오버 또는 다음 이미지로
+    if (newLives <= 0) {
+      clearInterval(timerRef.current);
+      
+      if (currentImageIndex < imageData.length - 1) {
+        // 다음 이미지가 존재하면 다음 게임으로
+        alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
+        setTimeout(() => {
+          setCurrentImageIndex(currentImageIndex + 1);
+          setCorrectAnswers([]);
+          setWrongAnswers([]);
+          setTimeLeft(180);
+          setLives(10);
+          startTimer();
+        }, 500);
+      } else {
+        // 더 이상 이미지가 없으면 게임오버
+        setIsGameOver(true);
+        setUserScore(0);
+        alert('목숨을 모두 소진했습니다. 게임오버!');
+      }
+      return;
+    }
+
     // 테스트 모드 체크 (개발 환경에서만 활성화)
     const isTestMode = process.env.REACT_APP_TEST_MODE_ENABLED === 'true' && 
                        gameRoomId && gameRoomId.startsWith('test_');
 
     if (isTestMode) {
-      // 테스트 모드: Mock 응답 생성
+      // 테스트 모드: Mock 응답 생성 (이미 목숨은 차감됨)
       handleTestModeClick(parseFloat(x), parseFloat(y));
       return;
     }
@@ -210,6 +249,15 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
         } else {
           // 오답 처리 - 이전 정답만 표시
           setCorrectAnswers(data.correctCoords);
+          // 오답 X표시 추가
+          const wrongCoord = { x: parseFloat(x), y: parseFloat(y) };
+          setWrongAnswers([...wrongAnswers, wrongCoord]);
+          // 1초 후 X표시 제거
+          setTimeout(() => {
+            setWrongAnswers(prev => prev.filter(coord => 
+              coord.x !== parseFloat(x) || coord.y !== parseFloat(y)
+            ));
+          }, 1000);
         }
       }
     } catch (error) {
@@ -247,6 +295,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
         setIsWaiting(false);
         setCurrentImageIndex(nextIndex);
         setCorrectAnswers([]);
+        setWrongAnswers([]);
         startTimer();
       }
     };
@@ -292,6 +341,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     clearInterval(timerRef.current);
     setCurrentImageIndex(0);
     setCorrectAnswers([]);
+    setWrongAnswers([]);
     setIsGameOver(false);
     onNavigate('home');
   };
@@ -344,6 +394,11 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     <div className="game-page">
       <div className="game-header">
         <div className="game-info">
+          <div className="lives-container">
+            <span className="lives-label">❤️ {lives}</span>
+          </div>
+        </div>
+        <div className="game-progress">
           <span>게임 {currentImageIndex + 1} / {imageData.length}</span>
         </div>
         <div className="timer">
@@ -375,6 +430,19 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
                 }}
               />
             ))}
+            {/* 오답 X표시 */}
+            {wrongAnswers.map((coord, index) => (
+              <div
+                key={`wrong-${index}`}
+                className="wrong-mark"
+                style={{
+                  left: `${coord.x * 100}%`,
+                  top: `${coord.y * 100}%`,
+                }}
+              >
+                ✕
+              </div>
+            ))}
           </div>
         </div>
 
@@ -398,6 +466,19 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
                   top: `${coord.y * 100}%`,
                 }}
               />
+            ))}
+            {/* 오답 X표시 */}
+            {wrongAnswers.map((coord, index) => (
+              <div
+                key={`wrong-${index}`}
+                className="wrong-mark"
+                style={{
+                  left: `${coord.x * 100}%`,
+                  top: `${coord.y * 100}%`,
+                }}
+              >
+                ✕
+              </div>
             ))}
           </div>
         </div>

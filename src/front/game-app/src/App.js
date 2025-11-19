@@ -19,7 +19,7 @@ function App() {
     
     if (!storedSessionId) {
       // TODO: 실제로는 서버로부터 받아야 함
-      const newSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      const newSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
       localStorage.setItem('sessionId', newSessionId);
       setSessionId(newSessionId);
     } else {
@@ -29,7 +29,7 @@ function App() {
 
   return (
     <div className="App">
-      <Header />
+      <Header onNavigate={setCurrentPage} />
       
       <main className="main-content">
         {currentPage === 'home' && (

@@ -16,9 +16,29 @@
 }
 
 .game-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   font-size: 18px;
   font-weight: bold;
   color: #2c3e50;
+}
+
+.lives-container {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.lives-label {
+  font-size: 20px;
+  color: #e74c3c;
+  font-weight: bold;
+  padding: 5px 12px;
+  background-color: #fff5f5;
+  border-radius: 20px;
+  border: 2px solid #e74c3c;
+  box-shadow: 0 2px 4px rgba(231, 76, 60, 0.2);
 }
 
 .timer {
@@ -87,12 +107,43 @@
   background-color: rgba(231, 76, 60, 0.2);
 }
 
+.wrong-mark {
+  position: absolute;
+  width: 40px;
+  height: 40px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  animation: wrongMarkAppear 0.3s ease-out;
+  color: #e74c3c;
+  font-size: 36px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+}
+
 @keyframes markAppear {
   0% {
     transform: translate(-50%, -50%) scale(0);
   }
   100% {
     transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes wrongMarkAppear {
+  0% {
+    transform: translate(-50%, -50%) scale(0) rotate(0deg);
+    opacity: 0;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.2) rotate(180deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1) rotate(360deg);
+    opacity: 1;
   }
 }
 
