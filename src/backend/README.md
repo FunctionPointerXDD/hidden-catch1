@@ -31,8 +31,11 @@ src/backend
    - `.env` 파일에 아래와 같이 필요한 값을 정의합니다.
      ```
      DEBUG=True
+     DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/hiddencatch
+     DATABASE_ECHO=False
      ```
    - 기본적으로 `HiddenCatch API`, `0.1.0`, `development` 값이 설정되어 있으며 필요 시 덮어쓸 수 있습니다.
+   - `DATABASE_URL`은 SQLAlchemy 포맷의 PostgreSQL DSN입니다. 필요시 풀 사이즈(`DATABASE_POOL_SIZE`), `DATABASE_MAX_OVERFLOW`, `ALLOWED_ORIGINS` 등을 함께 정의하세요.
 
 3. **서버 실행**
    ```bash

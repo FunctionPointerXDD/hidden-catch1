@@ -1,5 +1,10 @@
 from datetime import datetime, timedelta
 
+from fastapi import Depends
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.db.session import get_db
 from app.schemas.game import (
     CreateGameRequest,
     CreateGameResponse,
@@ -21,7 +26,13 @@ from app.schemas.puzzle import (
 
 
 class GameService:
+    def __init__(self, session: Session):
+        self.session = session
+
     def create_game(self, payload: CreateGameRequest) -> CreateGameResponse:
+        # Health-check query to ensure the PostgreSQL connection is alive.
+        self.session.execute(text("SELECT 1"))
+
         now = datetime.now()
         slots = [
             UploadSlot(
@@ -148,5 +159,5 @@ class GameService:
         )
 
 
-def get_game_service() -> GameService:
-    return GameService()
+def get_game_service(session: Session = Depends(get_db)) -> GameService:
+    return GameService(session)

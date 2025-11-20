@@ -70,7 +70,7 @@ class GameStageHit(Base):
         nullable=False,
     )
     difference_id: Mapped[int | None] = mapped_column(
-        ForeignKey("puzzle_differences.id", ondelete="SET NULL"),
+        ForeignKey("differences.id", ondelete="SET NULL"),
         nullable=True,
     )
     hit_at: Mapped[datetime] = mapped_column(default=datetime.now)
