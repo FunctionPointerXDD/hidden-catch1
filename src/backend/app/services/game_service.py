@@ -1,8 +1,11 @@
 from datetime import datetime, timedelta
+from typing import Any
 
+import boto3
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.db.session import get_db
 from app.models import Game, GameStage, GameStageHit, GameUploadSlot
 from app.schemas.game import (
@@ -26,9 +29,40 @@ from app.schemas.puzzle import (
 )
 
 
+def _build_s3_client() -> Any:
+    client_kwargs: dict[str, str] = {}
+    if settings.aws_access_key_id and settings.aws_secret_access_key:
+        client_kwargs["aws_access_key_id"] = settings.aws_access_key_id
+        client_kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+    return boto3.client("s3", region_name=settings.aws_region, **client_kwargs)
+
+
+_S3_CLIENT = _build_s3_client()
+
+
 class GameService:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, s3_client: Any | None = None):
         self.session = session
+        self.s3_client = s3_client or _S3_CLIENT
+
+    def _build_slot_key(self, game_id: int, slot_number: int) -> str:
+        prefix = settings.s3_upload_prefix.strip("/")
+        key_suffix = f"game-{game_id}/slot-{slot_number}.png"
+        return f"{prefix}/{key_suffix}" if prefix else key_suffix
+
+    def _generate_presigned_upload_url(self, object_key: str) -> str:
+        if not settings.s3_bucket_name:
+            raise HTTPException(status_code=500, detail="S3 bucket is not configured")
+        ttl = settings.s3_presign_ttl_seconds if settings.s3_presign_ttl_seconds > 0 else 900
+        return self.s3_client.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={
+                "Bucket": settings.s3_bucket_name,
+                "Key": object_key,
+                "ContentType": "image/png",
+            },
+            ExpiresIn=ttl,
+        )
 
     def create_game(self, payload: CreateGameRequest) -> CreateGameResponse:
         game = Game(
@@ -42,20 +76,23 @@ class GameService:
 
         now = datetime.now()
         slots: list[UploadSlot] = []
-        slot_statuses: list[UploadSlotStatus] = []
-
+        ttl_seconds = (
+            settings.s3_presign_ttl_seconds
+            if settings.s3_presign_ttl_seconds > 0
+            else 900
+        )
         for index in range(payload.requested_slot_count):
             slot_number = index + 1
-            expires_at = now + timedelta(minutes=15)
-            presigned_url = (
-                f"https://s3.example.com/uploads/game-{game.id}/slot-{slot_number}"
-            )
+            expires_at = now + timedelta(seconds=ttl_seconds)
+            object_key = self._build_slot_key(game.id, slot_number)
+            presigned_url = self._generate_presigned_upload_url(object_key)
 
             upload_slot = GameUploadSlot(
                 game_id=game.id,
                 slot_number=slot_number,
                 presigned_url=presigned_url,
                 expires_at=expires_at,
+                s3_object_key=object_key,
             )
             self.session.add(upload_slot)
 
@@ -66,8 +103,6 @@ class GameService:
                     expires_at=expires_at,
                 )
             )
-            slot_statuses.append(UploadSlotStatus(slot=slot_number))
-
         self.session.commit()
         return CreateGameResponse(
             game_id=game.id,
@@ -75,7 +110,6 @@ class GameService:
             difficulty=payload.difficulty,
             status="waiting_upload",
             upload_slots=slots,
-            slot_statuses=slot_statuses,
             time_limit_seconds=payload.time_limit_seconds or 300,
         )
 
@@ -94,8 +128,8 @@ class GameService:
             raise HTTPException(status_code=404, detail="Upload slot not found")
 
         slot.uploaded = True
-        slot.s3_object_key = slot.s3_object_key or (
-            f"games/{game_id}/slot-{slot.slot_number}.png"
+        slot.s3_object_key = slot.s3_object_key or self._build_slot_key(
+            game_id, slot.slot_number
         )
         slot.analysis_status = "pending"
         slot.analysis_error = None
@@ -181,6 +215,7 @@ class GameService:
         puzzle_schema = (
             PuzzleForGameResponse(
                 puzzle_id=puzzle.id,
+                original_image_url=puzzle.original_image_url,
                 modified_image_url=puzzle.modified_image_url,
                 width=puzzle.width,
                 height=puzzle.height,
@@ -301,6 +336,7 @@ class GameService:
         if next_stage and next_stage.puzzle:
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
+                original_image_url=next_stage.puzzle.original_image_url,
                 modified_image_url=next_stage.puzzle.modified_image_url,
                 width=next_stage.puzzle.width,
                 height=next_stage.puzzle.height,
