@@ -5,6 +5,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.puzzle import Difference, Puzzle
+from app.models.upload_slot import GameUploadSlot
 
 
 class Game(Base):
@@ -26,6 +27,12 @@ class Game(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
         order_by="GameStage.stage_number",
+    )
+    upload_slots: Mapped[list[GameUploadSlot]] = relationship(
+        back_populates="game",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="GameUploadSlot.slot_number",
     )
 
 
