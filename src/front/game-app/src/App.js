@@ -10,7 +10,6 @@ import GamePage from './components/GamePage';
 function App() {
   const [currentPage, setCurrentPage] = useState('home'); // 'home', 'upload', 'game'
   const [sessionId, setSessionId] = useState(null);
-  const [uploadedImages, setUploadedImages] = useState([]);
 
   // 세션ID 생성 및 localStorage 저장
   useEffect(() => {
@@ -40,8 +39,6 @@ function App() {
         {currentPage === 'upload' && (
           <ImageUploadPage 
             onNavigate={setCurrentPage}
-            uploadedImages={uploadedImages}
-            setUploadedImages={setUploadedImages}
           />
         )}
         

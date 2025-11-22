@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import './ImageUploadPage.css';
 
-function ImageUploadPage({ onNavigate, uploadedImages, setUploadedImages }) {
+function ImageUploadPage({ onNavigate }) {
+  const [uploadedImages, setUploadedImages] = useState([]);
   const [previews, setPreviews] = useState([]);
   const MAX_IMAGES = 5;
   
