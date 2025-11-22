@@ -28,7 +28,7 @@ class UploadSlotStatus(BaseModel):
         description="서버가 슬롯에 매핑한 S3 객체 키",
     )
     uploaded: bool = Field(default=False, description="업로드 완료 여부")
-    analysis_status: UploadAnalysisStatus = Field(
+    analysis_status: str = Field(
         default="pending",
         description="Vision 분석 진행 상태",
     )
@@ -36,7 +36,7 @@ class UploadSlotStatus(BaseModel):
         default=None,
         description="분석 실패 시 오류 메시지",
     )
-    detected_objects: list["DetectedObject"] | None = Field(
+    detected_objects: list[dict] | None = Field(
         default=None,
         description="Vision API에서 반환된 오브젝트 목록",
     )
@@ -93,7 +93,7 @@ class CreateGameResponse(BaseModel):
 
     game_id: int = Field(..., description="생성된 게임 식별자")
     mode: str = Field(..., description="게임 모드")
-    difficulty: Difficulty | None = Field(
+    difficulty: str | None = Field(
         default=None,
         description="지정된 난이도",
     )
@@ -101,10 +101,6 @@ class CreateGameResponse(BaseModel):
     upload_slots: list[UploadSlot] = Field(
         ...,
         description="각 슬롯의 presigned URL 목록",
-    )
-    slot_statuses: list[UploadSlotStatus] = Field(
-        default_factory=list,
-        description="슬롯별 업로드 진행 상태",
     )
     time_limit_seconds: int = Field(..., description="제한 시간(초)")
 
@@ -120,7 +116,7 @@ class UploadSlotsStatusResponse(BaseModel):
     """업로드 진행 상태 응답"""
 
     game_id: int = Field(..., description="게임 식별자")
-    status: GameStatus = Field(..., description="게임 상태")
+    status: str = Field(..., description="게임 상태")
     slot_statuses: list[UploadSlotStatus] = Field(
         ...,
         description="슬롯별 업로드 정보 목록",
@@ -132,11 +128,11 @@ class GameDetailResponse(BaseModel):
 
     game_id: int = Field(..., description="게임 ID")
     mode: str = Field(..., description="게임 모드")
-    difficulty: Difficulty | None = Field(
+    difficulty: str | None = Field(
         default=None,
         description="게임 난이도",
     )
-    status: GameStatus = Field(..., description="현재 상태")
+    status: str = Field(..., description="현재 상태")
     created_at: datetime = Field(..., description="생성 시각")
     updated_at: datetime | None = Field(
         default=None,
@@ -157,7 +153,7 @@ class StageResultResponse(BaseModel):
     game_id: int = Field(..., description="게임 식별자")
     stage_number: int = Field(..., description="현재 스테이지 번호")
     total_stages: int = Field(..., description="전체 스테이지 수")
-    status: GameStatus = Field(..., description="현재 게임 상태")
+    status: str = Field(..., description="현재 게임 상태")
     current_score: int = Field(..., description="현재까지의 누적 점수")
     found_difference_count: int = Field(..., description="이번 스테이지에서 찾은 개수")
     total_difference_count: int = Field(
@@ -192,11 +188,9 @@ class FinishGameResponse(BaseModel):
     """게임 종료 결과 응답"""
 
     game_id: int = Field(..., description="게임 ID")
-    status: GameStatus = Field(..., description="최종 상태")
-    difficulty: Difficulty | None = Field(
+    status: str = Field(..., description="최종 상태")
+    difficulty: str | None = Field(
         default=None,
         description="게임 난이도",
     )
     final_score: int = Field(..., description="최종 점수")
-    found_difference_count: int = Field(..., description="찾은 개수")
-    total_difference_count: int = Field(..., description="전체 개수")
