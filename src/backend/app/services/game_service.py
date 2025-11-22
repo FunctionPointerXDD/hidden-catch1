@@ -24,7 +24,7 @@ from app.schemas.game import (
 from app.schemas.puzzle import (
     CheckAnswerRequest,
     CheckAnswerResponse,
-    DifferenceInfo,
+    FoundDifference,
     HitAttempt,
     PuzzleForGameResponse,
 )
@@ -378,13 +378,21 @@ class GameService:
         game_id: int,
         payload: FinishGameRequest,
     ) -> FinishGameResponse:
+        game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
+        if game is None:
+            raise HTTPException(status_code=404, detail="Game not found.")
+
+        game.status = "finished"
+
+        final_score = game.current_score
+
+        self.session.commit()
+
         return FinishGameResponse(
             game_id=game_id,
-            status="finished",
-            difficulty="normal",
-            final_score=2000,
-            found_difference_count=25,
-            total_difference_count=30,
+            status=game.status,
+            difficulty=game.difficulty,
+            final_score=final_score,
         )
 
     def _match_difference(self, differences, x: float, y: float):
@@ -405,17 +413,15 @@ class GameService:
         is_already_found: bool = False,
         total_difference_count: int,
     ) -> CheckAnswerResponse:
-        found_infos: list[DifferenceInfo] = []
+        found_infos: list[FoundDifference] = []
         for hit in stage.hits:
             if hit.difference is None:
                 continue
             found_infos.append(
-                DifferenceInfo(
+                FoundDifference(
                     difference_id=hit.difference.id,
-                    x=hit.difference.x,
-                    y=hit.difference.y,
-                    width=hit.difference.width,
-                    height=hit.difference.height,
+                    x=hit.difference.x + hit.difference.width / 2,
+                    y=hit.difference.y + hit.difference.height / 2,
                     label=hit.difference.label,
                     hit_at=hit.hit_at,
                 )

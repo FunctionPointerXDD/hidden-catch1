@@ -23,6 +23,16 @@ class DifferenceInfo(BaseModel):
     )
 
 
+class FoundDifference(BaseModel):
+    """클라이언트에 알려줄 핵심 정답 정보"""
+
+    difference_id: int = Field(..., description="Rect ID")
+    x: float = Field(..., description="Rect 중심 좌표 X")
+    y: float = Field(..., description="Rect 중심 좌표 Y")
+    label: str | None = Field(..., description="탐지된 오브젝트")
+    hit_at: datetime | None = Field(..., description="해당 Rect를 맞춘 시각")
+
+
 class HitAttempt(BaseModel):
     """사용자가 방금 터치한 좌표"""
 
@@ -96,7 +106,7 @@ class CheckAnswerResponse(BaseModel):
         default=None,
         description="이번 요청에서 사용자가 터치한 좌표",
     )
-    found_differences: list[DifferenceInfo] = Field(
+    found_differences: list[FoundDifference] = Field(
         default_factory=list,
         description="해당 스테이지에서 현재까지 맞힌 차이 목록",
     )
