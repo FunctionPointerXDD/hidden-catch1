@@ -114,6 +114,7 @@
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.3s;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 }
 
 .back-button {
@@ -123,6 +124,11 @@
 
 .back-button:hover {
   background-color: #7f8c8d;
+}
+
+.back-button:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
 
 .start-button {

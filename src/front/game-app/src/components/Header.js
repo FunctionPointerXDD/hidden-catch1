@@ -26,7 +26,9 @@ function Header({ onNavigate }) {
   return (
     <header className="header">
       <div className="header-title" onClick={handleGoHome}>
-        <h1>Hidden Catch</h1>
+        <h1>
+          Hidden Catc<span className="magnifying-glass-wrapper">h</span>
+        </h1>
       </div>
       <nav className="header-nav">
         <button onClick={handleLogin} className="nav-button">로그인</button>

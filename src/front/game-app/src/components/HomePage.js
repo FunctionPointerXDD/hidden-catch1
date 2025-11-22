@@ -14,7 +14,7 @@ function HomePage({ onNavigate }) {
   return (
     <div className="home-page">
       <div className="home-content">
-        <h2 className="home-subtitle">틀린그림찾기 게임</h2>
+        <h2 className="home-subtitle">Hidden Catch</h2>
         <div className="button-container">
           <button onClick={handlePlay} className="game-button play-button">
             플레이
