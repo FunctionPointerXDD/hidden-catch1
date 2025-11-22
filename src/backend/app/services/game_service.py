@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import Game, GameStage, GameStageHit, GameUploadSlot
+from app.models import Difference, Game, GameStage, GameStageHit, GameUploadSlot, Puzzle
 from app.schemas.game import (
     CreateGameRequest,
     CreateGameResponse,
@@ -154,7 +154,7 @@ class GameService:
         if game is None:
             raise HTTPException(status_code=404, detail="Game not found")
         if all_uploaded and game.status == "waiting_upload":
-            game.status = "waiting_puzzle"
+            self._assign_dummy_puzzle_if_needed(game, slots)
 
         status = [
             UploadSlotStatus(
@@ -195,9 +195,13 @@ class GameService:
             )
             for slot in slots
         ]
+        game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
+        if game is None:
+            raise HTTPException(status_code=404, detail="Game not found")
+
         return UploadSlotsStatusResponse(
             game_id=game_id,
-            status="waiting_upload",
+            status=game.status,
             slot_statuses=status,
         )
 
@@ -229,8 +233,8 @@ class GameService:
         puzzle_schema = (
             PuzzleForGameResponse(
                 puzzle_id=puzzle.id,
-                original_image_url=puzzle.original_image_url,
-                modified_image_url=puzzle.modified_image_url,
+                original_image_url=self._build_view_url(puzzle.original_image_url),
+                modified_image_url=self._build_view_url(puzzle.modified_image_url),
                 width=puzzle.width,
                 height=puzzle.height,
                 total_difference_count=len(puzzle.differences),
@@ -352,8 +356,12 @@ class GameService:
         if next_stage and next_stage.puzzle:
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
-                original_image_url=next_stage.puzzle.original_image_url,
-                modified_image_url=next_stage.puzzle.modified_image_url,
+                original_image_url=self._build_view_url(
+                    next_stage.puzzle.original_image_url
+                ),
+                modified_image_url=self._build_view_url(
+                    next_stage.puzzle.modified_image_url
+                ),
                 width=next_stage.puzzle.width,
                 height=next_stage.puzzle.height,
                 total_difference_count=len(next_stage.puzzle.differences),
@@ -437,6 +445,104 @@ class GameService:
             newly_hit_difference=attempt,
             found_differences=found_infos,
         )
+
+    def _assign_dummy_puzzle_if_needed(
+        self, game: Game, slots: list[GameUploadSlot]
+    ) -> None:
+        """Celery/AI 없이 더미 데이터 생성"""
+        if game.stages:
+            game.status = "playing"
+            return
+
+        source_slot = next((slot for slot in slots if slot.uploaded), None)
+        if source_slot is None:
+            return
+
+        image_key = source_slot.s3_object_key or ""
+        width, height = 1024.0, 768.0
+        puzzle = Puzzle(
+            difficulty=game.difficulty or "normal",
+            original_image_url=image_key,
+            modified_image_url=image_key,
+            width=width,
+            height=height,
+        )
+        self.session.add(puzzle)
+        self.session.flush()
+
+        dummy_differences = self._build_dummy_differences(width, height)
+        for index, diff in enumerate(dummy_differences):
+            self.session.add(
+                Difference(
+                    puzzle_id=puzzle.id,
+                    index=index,
+                    x=diff["x"],
+                    y=diff["y"],
+                    width=diff["width"],
+                    height=diff["height"],
+                    label=diff["label"],
+                )
+            )
+
+        stage = GameStage(
+            game_id=game.id,
+            puzzle_id=puzzle.id,
+            stage_number=1,
+            status="playing",
+            started_at=datetime.now(),
+            total_difference_count=len(dummy_differences),
+        )
+        self.session.add(stage)
+        game.status = "playing"
+
+    def _build_view_url(self, stored_value: str | None) -> str:
+        if not stored_value:
+            raise HTTPException(status_code=500, detail="Puzzle image is not available")
+        if stored_value.startswith("http://") or stored_value.startswith("https://"):
+            return stored_value
+        if not settings.aws_s3_bucket_name:
+            raise HTTPException(status_code=500, detail="S3 bucket is not configured")
+        ttl = (
+            settings.aws_s3_presign_ttl_seconds
+            if settings.aws_s3_presign_ttl_seconds > 0
+            else 900
+        )
+        return self.s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={
+                "Bucket": settings.aws_s3_bucket_name,
+                "Key": stored_value,
+            },
+            ExpiresIn=ttl,
+        )
+
+    def _build_dummy_differences(
+        self, width: float, height: float
+    ) -> list[dict[str, float | str | None]]:
+        base = min(width, height) * 0.1
+        return [
+            {
+                "x": width * 0.15,
+                "y": height * 0.2,
+                "width": base,
+                "height": base,
+                "label": "clock",
+            },
+            {
+                "x": width * 0.55,
+                "y": height * 0.4,
+                "width": base,
+                "height": base,
+                "label": "tree",
+            },
+            {
+                "x": width * 0.35,
+                "y": height * 0.65,
+                "width": base,
+                "height": base,
+                "label": "window",
+            },
+        ]
 
 
 def get_game_service(session: Session = Depends(get_db)) -> GameService:
