@@ -1,93 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './GamePage.css';
 
-function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
+function GamePage({ onNavigate, sessionId }) {
+  const [gameData, setGameData] = useState(null);
+  const [puzzleData, setPuzzleData] = useState(null);
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [timeLeft, setTimeLeft] = useState(180); // 3분 = 180초
-  const [correctAnswers, setCorrectAnswers] = useState([]); // [{x, y}, ...]
+  const [correctAnswers, setCorrectAnswers] = useState([]); // found_differences 배열
   const [wrongAnswers, setWrongAnswers] = useState([]); // 오답 좌표 [{x, y}, ...]
   const [gameRoomId, setGameRoomId] = useState(null);
   const [isGameOver, setIsGameOver] = useState(false);
   const [userScore, setUserScore] = useState(0);
+  const [finalScore, setFinalScore] = useState(0); // 최종 점수
   const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(10); // 목숨
+  const [currentStage, setCurrentStage] = useState(0); // 현재 스테이지 번호
   
   const originalImageRef = useRef(null);
   const modifiedImageRef = useRef(null);
   const timerRef = useRef(null);
-
-  const TOTAL_DIFFERENCES = 3; // 틀린 부분 개수
-
-  // 테스트 모드용 Mock 정답 좌표 (각 이미지마다 3개씩)
-  const mockAnswers = [
-    [
-      { x: 0.25, y: 0.25 },
-      { x: 0.5, y: 0.5 },
-      { x: 0.75, y: 0.75 }
-    ],
-    [
-      { x: 0.3, y: 0.4 },
-      { x: 0.6, y: 0.6 },
-      { x: 0.8, y: 0.3 }
-    ]
-  ];
-
-  // 테스트 모드 클릭 핸들러 (목숨은 handleImageClick에서 이미 차감됨)
-  const handleTestModeClick = (x, y) => {
-    const currentMockAnswers = mockAnswers[currentImageIndex] || [];
-    const tolerance = 0.1; // 10% 오차 허용
-
-    // 클릭한 좌표가 정답 좌표 근처인지 확인
-    const isCorrect = currentMockAnswers.some(answer => {
-      const alreadyFound = correctAnswers.some(found => 
-        Math.abs(found.x - answer.x) < 0.01 && Math.abs(found.y - answer.y) < 0.01
-      );
-      
-      if (alreadyFound) return false;
-
-      return Math.abs(x - answer.x) < tolerance && Math.abs(y - answer.y) < tolerance;
-    });
-
-    if (isCorrect) {
-      // 정답을 찾은 경우
-      const foundAnswer = currentMockAnswers.find(answer => 
-        Math.abs(x - answer.x) < tolerance && Math.abs(y - answer.y) < tolerance
-      );
-      
-      const newCorrectAnswers = [...correctAnswers, foundAnswer];
-      setCorrectAnswers(newCorrectAnswers);
-
-      console.log('정답! 현재 찾은 개수:', newCorrectAnswers.length);
-
-      // 모든 정답을 찾았는지 확인
-      if (newCorrectAnswers.length >= TOTAL_DIFFERENCES) {
-        setTimeout(() => {
-          if (currentImageIndex < imageData.length - 1) {
-            // 다음 이미지로
-            setCurrentImageIndex(currentImageIndex + 1);
-            setCorrectAnswers([]);
-            setWrongAnswers([]);
-            setTimeLeft(180);
-            setLives(10);
-          } else {
-            // 게임 종료
-            setUserScore(newCorrectAnswers.length * 1000 + Math.floor(timeLeft * 10));
-            setIsGameOver(true);
-            clearInterval(timerRef.current);
-          }
-        }, 1000);
-      }
-    } else {
-      console.log('오답입니다. 남은 목숨:', lives);
-      // 오답 표시 추가
-      const wrongCoord = { x, y };
-      setWrongAnswers([...wrongAnswers, wrongCoord]);
-      // 1초 후 X표시 제거
-      setTimeout(() => {
-        setWrongAnswers(prev => prev.filter(coord => coord.x !== x || coord.y !== y));
-      }, 1000);
-    }
-  };
+  const stageStartTimeRef = useRef(null); // 스테이지 시작 시간
 
   // 게임 초기화
   useEffect(() => {
@@ -95,19 +27,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     const storedGameRoomId = localStorage.getItem('currentGameRoomId');
     if (storedGameRoomId) {
       setGameRoomId(storedGameRoomId);
-    } else {
-      // 없으면 새로 생성 (fallback)
-      const newGameRoomId = 'room_' + Date.now();
-      setGameRoomId(newGameRoomId);
-      localStorage.setItem('currentGameRoomId', newGameRoomId);
-    }
-    
-    // 타이머 시작
-    startTimer();
-
-    // 다음 이미지 미리 로드
-    if (imageData && imageData.length > 1) {
-      preloadNextImages();
+      loadGameData(storedGameRoomId);
     }
 
     return () => {
@@ -116,7 +36,36 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentImageIndex]);
+  }, []);
+
+  // 게임 데이터 로드
+  const loadGameData = async (gameId) => {
+    try {
+      const response = await fetch(`/api/v1/games/${gameId}`);
+      
+      if (!response.ok) {
+        alert('게임 데이터를 불러오지 못했습니다.');
+        return;
+      }
+
+      const data = await response.json();
+      console.log('게임 데이터 로드:', data);
+      
+      setGameData(data);
+      setPuzzleData(data.puzzle);
+      setCurrentStage(data.current_stage || 0);
+      setUserScore(data.current_score || 0);
+      
+      // 스테이지 시작 시간 기록
+      stageStartTimeRef.current = Date.now();
+      
+      // 타이머 시작
+      startTimer();
+    } catch (error) {
+      console.error('게임 데이터 로드 에러:', error);
+      alert('게임 데이터 로드 중 오류가 발생했습니다.');
+    }
+  };
 
   // 타이머 시작
   const startTimer = () => {
@@ -141,32 +90,23 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     clearInterval(timerRef.current);
     alert('시간 초과! 다음 게임으로 넘어갑니다.');
     
-    if (currentImageIndex < imageData.length - 1) {
+    if (gameData && currentImageIndex < gameData.total_stages - 1) {
       nextGame();
     } else {
       endGame();
     }
   };
 
-  // 다음 이미지 미리 로드
-  const preloadNextImages = () => {
-    const nextIndex = currentImageIndex + 1;
-    if (nextIndex < imageData.length) {
-      const img1 = new Image();
-      const img2 = new Image();
-      img1.src = imageData[nextIndex].original;
-      img2.src = imageData[nextIndex].modified;
-    }
-  };
-
   // 이미지 클릭 핸들러
   const handleImageClick = async (e, isOriginal) => {
-    const rect = e.target.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width).toFixed(4);
-    const y = ((e.clientY - rect.top) / rect.height).toFixed(4);
-    const clickTime = new Date().toISOString();
+    if (!puzzleData || !gameRoomId) return;
 
-    console.log(`클릭 좌표: (${x}, ${y}), 시각: ${clickTime}`);
+    const rect = e.target.getBoundingClientRect();
+    // 실제 픽셀 좌표 계산 (정규화하지 않음)
+    const clickX = Math.round((e.clientX - rect.left) * (puzzleData.width / rect.width));
+    const clickY = Math.round((e.clientY - rect.top) * (puzzleData.height / rect.height));
+
+    console.log(`클릭 좌표: (${clickX}, ${clickY}), 이미지 크기: ${puzzleData.width}x${puzzleData.height}`);
 
     // 목숨 차감
     const newLives = lives - 1;
@@ -176,89 +116,72 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     if (newLives <= 0) {
       clearInterval(timerRef.current);
       
-      if (currentImageIndex < imageData.length - 1) {
+      if (gameData && currentImageIndex < gameData.total_stages - 1) {
         // 다음 이미지가 존재하면 다음 게임으로
         alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
         setTimeout(() => {
-          setCurrentImageIndex(currentImageIndex + 1);
-          setCorrectAnswers([]);
-          setWrongAnswers([]);
-          setTimeLeft(180);
-          setLives(10);
-          startTimer();
+          nextGame();
         }, 500);
       } else {
         // 더 이상 이미지가 없으면 게임오버
         setIsGameOver(true);
-        setUserScore(0);
         alert('목숨을 모두 소진했습니다. 게임오버!');
       }
       return;
     }
 
-    // 테스트 모드 체크 (개발 환경에서만 활성화)
-    const isTestMode = process.env.REACT_APP_TEST_MODE_ENABLED === 'true' && 
-                       gameRoomId && gameRoomId.startsWith('test_');
-
-    if (isTestMode) {
-      // 테스트 모드: Mock 응답 생성 (이미 목숨은 차감됨)
-      handleTestModeClick(parseFloat(x), parseFloat(y));
-      return;
-    }
-
-    // 서버로 클릭 좌표 및 시각 전송
+    // 서버로 클릭 좌표 전송
     try {
-      const currentImage = imageData[currentImageIndex];
-      
-      // TODO: 실제 서버 엔드포인트로 변경 필요
-      const response = await fetch('/api/check-answer', {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          gameRoomId: gameRoomId,
-          userId: sessionId,
-          imageUrl: currentImage.original,
-          x: parseFloat(x),
-          y: parseFloat(y),
-          clickTime: clickTime,
+          x: clickX,
+          y: clickY
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
-        // 서버 응답: { gameRoomId, userId, isCorrect, correctCoords: [{x, y}, ...], end: false, score: 0 }
+        console.log('답안 체크 응답:', data);
         
-        if (data.end) {
-          // 게임 종료
-          setUserScore(data.score);
-          setIsGameOver(true);
-          clearInterval(timerRef.current);
-          return;
-        }
+        // 현재 점수 업데이트
+        setUserScore(data.current_score);
+        
+        // found_differences로 정답 표시 업데이트
+        setCorrectAnswers(data.found_differences || []);
 
-        if (data.isCorrect) {
+        if (data.is_correct) {
           // 정답 처리
-          setCorrectAnswers(data.correctCoords);
+          if (!data.is_already_found) {
+            console.log('새로운 정답 발견!');
+          }
           
           // 모든 정답을 찾았는지 확인
-          if (data.correctCoords.length >= TOTAL_DIFFERENCES) {
+          if (data.found_difference_count >= data.total_difference_count) {
             handleAllCorrect();
           }
         } else {
-          // 오답 처리 - 이전 정답만 표시
-          setCorrectAnswers(data.correctCoords);
-          // 오답 X표시 추가
-          const wrongCoord = { x: parseFloat(x), y: parseFloat(y) };
+          // 오답 처리 - X표시 추가
+          const wrongCoord = { x: clickX, y: clickY };
           setWrongAnswers([...wrongAnswers, wrongCoord]);
           // 1초 후 X표시 제거
           setTimeout(() => {
             setWrongAnswers(prev => prev.filter(coord => 
-              coord.x !== parseFloat(x) || coord.y !== parseFloat(y)
+              coord.x !== clickX || coord.y !== clickY
             ));
           }, 1000);
         }
+        
+        // 게임 상태 확인
+        if (data.game_status === 'completed') {
+          setIsGameOver(true);
+          clearInterval(timerRef.current);
+        }
+      } else {
+        console.error('답안 체크 실패:', response.status);
       }
     } catch (error) {
       console.error('답안 체크 에러:', error);
@@ -266,74 +189,121 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
   };
 
   // 모든 정답을 찾았을 때
-  const handleAllCorrect = () => {
+  const handleAllCorrect = async () => {
     clearInterval(timerRef.current);
     
-    setTimeout(() => {
-      if (currentImageIndex < imageData.length - 1) {
-        nextGame();
+    // 플레이 시간 계산 (밀리초)
+    const playTimeMilliseconds = Date.now() - stageStartTimeRef.current;
+    
+    try {
+      // 스테이지 완료 요청
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          play_time_milliseconds: playTimeMilliseconds
+        }),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log('스테이지 완료 응답:', data);
+        
+        // 점수 및 상태 업데이트
+        setUserScore(data.current_score);
+        setCurrentStage(data.stage_number);
+        
+        setTimeout(() => {
+          // next_puzzle이 있으면 다음 스테이지로
+          if (data.next_puzzle) {
+            // 다음 퍼즐 데이터로 업데이트
+            setPuzzleData(data.next_puzzle);
+            setGameData(prev => ({
+              ...prev,
+              current_stage: data.stage_number + 1,
+              total_stages: data.total_stages,
+              current_score: data.current_score
+            }));
+            
+            // 상태 초기화
+            const nextIndex = currentImageIndex + 1;
+            setCurrentImageIndex(nextIndex);
+            setCorrectAnswers([]);
+            setWrongAnswers([]);
+            setLives(10);
+            setTimeLeft(180);
+            
+            // 스테이지 시작 시간 기록
+            stageStartTimeRef.current = Date.now();
+            
+            // 타이머 시작
+            startTimer();
+          } else {
+            // 더 이상 스테이지가 없으면 게임 종료
+            alert('모든 게임을 완료했습니다!');
+            endGame();
+          }
+        }, 1000);
       } else {
-        alert('모든 게임을 완료했습니다!');
-        endGame();
+        console.error('스테이지 완료 요청 실패:', response.status);
+        alert('스테이지 완료 처리에 실패했습니다.');
       }
-    }, 1000);
+    } catch (error) {
+      console.error('스테이지 완료 에러:', error);
+      alert('스테이지 완료 중 오류가 발생했습니다.');
+    }
   };
 
   // 다음 게임으로
-  const nextGame = () => {
+  const nextGame = async () => {
+    // 이 함수는 더 이상 필요하지 않지만, 다른 곳에서 호출될 수 있으므로 유지
+    // handleAllCorrect에서 직접 처리함
     const nextIndex = currentImageIndex + 1;
+    setCurrentImageIndex(nextIndex);
+    setCorrectAnswers([]);
+    setWrongAnswers([]);
+    setLives(10);
+    setTimeLeft(180);
     
-    // 다음 이미지가 로드되었는지 확인
-    const nextImage = imageData[nextIndex];
-    const img1 = new Image();
-    const img2 = new Image();
-    
-    let loaded = 0;
-    const checkLoaded = () => {
-      loaded++;
-      if (loaded === 2) {
-        setIsWaiting(false);
-        setCurrentImageIndex(nextIndex);
-        setCorrectAnswers([]);
-        setWrongAnswers([]);
-        startTimer();
-      }
-    };
-
-    setIsWaiting(true);
-    img1.onload = checkLoaded;
-    img2.onload = checkLoaded;
-    img1.onerror = () => {
-      alert('이미지 로딩 실패');
-      setIsWaiting(false);
-    };
-    img2.onerror = () => {
-      alert('이미지 로딩 실패');
-      setIsWaiting(false);
-    };
-    
-    img1.src = nextImage.original;
-    img2.src = nextImage.modified;
+    // 다음 스테이지의 puzzle 데이터 로드
+    if (gameRoomId) {
+      await loadGameData(gameRoomId);
+    }
   };
 
   // 게임 종료
-  const endGame = () => {
+  const endGame = async () => {
     clearInterval(timerRef.current);
     
-    // 10분 후 localStorage 정리 (600000ms)
-    setTimeout(() => {
-      localStorage.removeItem('uploadedImages');
-      // TODO: 서버에 정리 요청 전송
-      fetch('/api/cleanup', {
+    try {
+      // 게임 종료 요청
+      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          gameRoomId: gameRoomId,
-          userId: sessionId,
-          imageUrls: imageData.map(img => img.original),
+          play_time_milliseconds: 0
         }),
       });
-    }, 600000);
+      
+      if (response.ok) {
+        const data = await response.json();
+        console.log('게임 종료 응답:', data);
+        
+        // 최종 점수 저장
+        setFinalScore(data.final_score);
+        setIsGameOver(true);
+      } else {
+        console.error('게임 종료 요청 실패:', response.status);
+        setIsGameOver(true);
+      }
+    } catch (error) {
+      console.error('게임 종료 에러:', error);
+      setIsGameOver(true);
+    }
   };
 
   // 돌아가기
@@ -353,7 +323,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  if (!imageData || imageData.length === 0) {
+  if (!puzzleData) {
     return (
       <div className="game-page">
         <div className="error-message">이미지 데이터가 없습니다.</div>
@@ -361,15 +331,13 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
     );
   }
 
-  const currentImage = imageData[currentImageIndex];
-
   // 게임 오버 화면
   if (isGameOver) {
     return (
       <div className="game-page">
         <div className="game-over">
           <h2>게임 종료!</h2>
-          <p className="score">당신의 점수: {userScore}</p>
+          <p className="score">최종 점수: {finalScore}</p>
           <button onClick={handleGoBack} className="back-button-game">
             돌아가기
           </button>
@@ -399,7 +367,7 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
           </div>
         </div>
         <div className="game-progress">
-          <span>게임 {currentImageIndex + 1} / {imageData.length}</span>
+          <span>게임 {currentImageIndex + 1} / {gameData?.total_stages || 1}</span>
         </div>
         <div className="timer">
           <span className={timeLeft <= 30 ? 'timer-warning' : ''}>
@@ -414,19 +382,21 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
           <div className="image-wrapper">
             <img
               ref={originalImageRef}
-              src={currentImage.original}
+              src={puzzleData.original_image_url}
               alt="원본"
               onClick={(e) => handleImageClick(e, true)}
               className="game-image"
             />
-            {/* 정답 표시 - 원본 이미지에도 표시 */}
-            {correctAnswers.map((coord, index) => (
+            {/* 정답 표시 - rect 형태 */}
+            {correctAnswers.map((diff, index) => (
               <div
                 key={index}
                 className="correct-mark"
                 style={{
-                  left: `${coord.x * 100}%`,
-                  top: `${coord.y * 100}%`,
+                  left: `${(diff.x / puzzleData.width) * 100}%`,
+                  top: `${(diff.y / puzzleData.height) * 100}%`,
+                  width: `${(diff.width / puzzleData.width) * 100}%`,
+                  height: `${(diff.height / puzzleData.height) * 100}%`,
                 }}
               />
             ))}
@@ -436,8 +406,8 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
                 key={`wrong-${index}`}
                 className="wrong-mark"
                 style={{
-                  left: `${coord.x * 100}%`,
-                  top: `${coord.y * 100}%`,
+                  left: `${(coord.x / puzzleData.width) * 100}%`,
+                  top: `${(coord.y / puzzleData.height) * 100}%`,
                 }}
               >
                 ✕
@@ -451,19 +421,21 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
           <div className="image-wrapper">
             <img
               ref={modifiedImageRef}
-              src={currentImage.modified}
+              src={puzzleData.modified_image_url}
               alt="수정된 이미지"
               onClick={(e) => handleImageClick(e, false)}
               className="game-image"
             />
-            {/* 정답 표시 */}
-            {correctAnswers.map((coord, index) => (
+            {/* 정답 표시 - rect 형태 */}
+            {correctAnswers.map((diff, index) => (
               <div
                 key={index}
                 className="correct-mark"
                 style={{
-                  left: `${coord.x * 100}%`,
-                  top: `${coord.y * 100}%`,
+                  left: `${(diff.x / puzzleData.width) * 100}%`,
+                  top: `${(diff.y / puzzleData.height) * 100}%`,
+                  width: `${(diff.width / puzzleData.width) * 100}%`,
+                  height: `${(diff.height / puzzleData.height) * 100}%`,
                 }}
               />
             ))}
@@ -473,8 +445,8 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
                 key={`wrong-${index}`}
                 className="wrong-mark"
                 style={{
-                  left: `${coord.x * 100}%`,
-                  top: `${coord.y * 100}%`,
+                  left: `${(coord.x / puzzleData.width) * 100}%`,
+                  top: `${(coord.y / puzzleData.height) * 100}%`,
                 }}
               >
                 ✕
@@ -485,7 +457,14 @@ function GamePage({ onNavigate, sessionId, imageData, setImageData }) {
       </div>
 
       <div className="progress-info">
-        <p>찾은 개수: {correctAnswers.length} / {TOTAL_DIFFERENCES}</p>
+        <p>찾은 개수: {correctAnswers.length} / {puzzleData?.total_difference_count || 0}</p>
+        <p>현재 점수: {userScore}</p>
+      </div>
+      
+      <div className="game-footer">
+        <button onClick={handleGoBack} className="back-button-game">
+          돌아가기
+        </button>
       </div>
     </div>
   );

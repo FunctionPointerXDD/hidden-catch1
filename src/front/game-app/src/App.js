@@ -11,7 +11,6 @@ function App() {
   const [currentPage, setCurrentPage] = useState('home'); // 'home', 'upload', 'game'
   const [sessionId, setSessionId] = useState(null);
   const [uploadedImages, setUploadedImages] = useState([]);
-  const [imageData, setImageData] = useState(null); // 서버로부터 받은 이미지 URL 데이터
 
   // 세션ID 생성 및 localStorage 저장
   useEffect(() => {
@@ -41,11 +40,8 @@ function App() {
         {currentPage === 'upload' && (
           <ImageUploadPage 
             onNavigate={setCurrentPage}
-            sessionId={sessionId}
             uploadedImages={uploadedImages}
             setUploadedImages={setUploadedImages}
-            imageData={imageData}
-            setImageData={setImageData}
           />
         )}
         
@@ -53,8 +49,6 @@ function App() {
           <GamePage 
             onNavigate={setCurrentPage}
             sessionId={sessionId}
-            imageData={imageData}
-            setImageData={setImageData}
           />
         )}
       </main>

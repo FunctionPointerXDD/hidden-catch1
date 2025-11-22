@@ -29,64 +29,6 @@
   font-size: 14px;
 }
 
-.test-mode-container {
-  text-align: center;
-  margin-bottom: 20px;
-  padding: 20px;
-  background-color: #fff3cd;
-  border-radius: 10px;
-  border: 2px dashed #ffc107;
-}
-
-.test-mode-button {
-  padding: 15px 40px;
-  background-color: #ffc107;
-  color: #000;
-  border: none;
-  border-radius: 8px;
-  font-size: 16px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: all 0.3s;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-}
-
-.test-mode-button:hover {
-  background-color: #ffb300;
-  transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-}
-
-.test-mode-info {
-  margin-top: 10px;
-  font-size: 12px;
-  color: #856404;
-}
-
-.divider {
-  text-align: center;
-  margin: 20px 0;
-  position: relative;
-}
-
-.divider::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 50%;
-  height: 1px;
-  background-color: #ddd;
-}
-
-.divider span {
-  position: relative;
-  background-color: white;
-  padding: 0 15px;
-  color: #7f8c8d;
-  font-size: 14px;
-}
-
 .upload-area {
   border: 2px dashed #3498db;
   border-radius: 10px;
