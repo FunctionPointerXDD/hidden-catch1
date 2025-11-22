@@ -124,7 +124,7 @@ function ImageUploadPage({ onNavigate, uploadedImages, setUploadedImages }) {
 
       // 4. 상태 폴링 (1초마다 확인)
       const pollStatus = async () => {
-        const statusResponse = await fetch(`/api/v1/games/${game_id}/uploads`);
+        const statusResponse = await fetch(`/api/v1/games/${game_id}`);
         
         if (!statusResponse.ok) {
           console.error('상태 조회 실패');
