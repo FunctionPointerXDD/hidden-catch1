@@ -10,7 +10,7 @@ function GamePage({ onNavigate, sessionId }) {
   const [wrongAnswers, setWrongAnswers] = useState([]); // 오답 좌표 [{x, y}, ...]
   const [gameRoomId, setGameRoomId] = useState(null);
   const [isGameOver, setIsGameOver] = useState(false);
-  const [userScore, setUserScore] = useState(0);
+  const [userScore, setUserScore] = useState(0); // 스테이지 점수
   const [finalScore, setFinalScore] = useState(0); // 최종 점수
   const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(10); // 목숨
@@ -86,19 +86,16 @@ function GamePage({ onNavigate, sessionId }) {
   };
 
   // 시간 초과 처리
-  const handleTimeOut = () => {
+  const handleTimeOut = async () => {
     clearInterval(timerRef.current);
     alert('시간 초과! 다음 게임으로 넘어갑니다.');
     
-    if (gameData && currentImageIndex < gameData.total_stages - 1) {
-      nextGame();
-    } else {
-      endGame();
-    }
+    // 시간 초과로 스테이지 완료 처리
+    await handleStageComplete();
   };
 
   // 이미지 클릭 핸들러
-  const handleImageClick = async (e, isOriginal) => {
+  const handleImageClick = async (e) => {
     if (!puzzleData || !gameRoomId) return;
 
     const rect = e.target.getBoundingClientRect();
@@ -115,18 +112,12 @@ function GamePage({ onNavigate, sessionId }) {
     // 목숨이 0이 되면 게임오버 또는 다음 이미지로
     if (newLives <= 0) {
       clearInterval(timerRef.current);
+      alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
       
-      if (gameData && currentImageIndex < gameData.total_stages - 1) {
-        // 다음 이미지가 존재하면 다음 게임으로
-        alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
-        setTimeout(() => {
-          nextGame();
-        }, 500);
-      } else {
-        // 더 이상 이미지가 없으면 게임오버
-        setIsGameOver(true);
-        alert('목숨을 모두 소진했습니다. 게임오버!');
-      }
+      // 목숨 소진으로 스테이지 완료 처리
+      setTimeout(async () => {
+        await handleStageComplete();
+      }, 500);
       return;
     }
 
@@ -191,7 +182,11 @@ function GamePage({ onNavigate, sessionId }) {
   // 모든 정답을 찾았을 때
   const handleAllCorrect = async () => {
     clearInterval(timerRef.current);
-    
+    await handleStageComplete();
+  };
+
+  // 스테이지 완료 처리 (공통 로직)
+  const handleStageComplete = async () => {
     // 플레이 시간 계산 (밀리초)
     const playTimeMilliseconds = Date.now() - stageStartTimeRef.current;
     
@@ -253,23 +248,6 @@ function GamePage({ onNavigate, sessionId }) {
     } catch (error) {
       console.error('스테이지 완료 에러:', error);
       alert('스테이지 완료 중 오류가 발생했습니다.');
-    }
-  };
-
-  // 다음 게임으로
-  const nextGame = async () => {
-    // 이 함수는 더 이상 필요하지 않지만, 다른 곳에서 호출될 수 있으므로 유지
-    // handleAllCorrect에서 직접 처리함
-    const nextIndex = currentImageIndex + 1;
-    setCurrentImageIndex(nextIndex);
-    setCorrectAnswers([]);
-    setWrongAnswers([]);
-    setLives(10);
-    setTimeLeft(180);
-    
-    // 다음 스테이지의 puzzle 데이터 로드
-    if (gameRoomId) {
-      await loadGameData(gameRoomId);
     }
   };
 
