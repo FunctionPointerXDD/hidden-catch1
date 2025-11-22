@@ -28,7 +28,7 @@ class UploadSlotStatus(BaseModel):
         description="서버가 슬롯에 매핑한 S3 객체 키",
     )
     uploaded: bool = Field(default=False, description="업로드 완료 여부")
-    analysis_status: UploadAnalysisStatus = Field(
+    analysis_status: str = Field(
         default="pending",
         description="Vision 분석 진행 상태",
     )
@@ -36,7 +36,7 @@ class UploadSlotStatus(BaseModel):
         default=None,
         description="분석 실패 시 오류 메시지",
     )
-    detected_objects: list["DetectedObject"] | None = Field(
+    detected_objects: list[dict] | None = Field(
         default=None,
         description="Vision API에서 반환된 오브젝트 목록",
     )
