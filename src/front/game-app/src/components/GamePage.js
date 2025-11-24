@@ -41,7 +41,7 @@ function GamePage({ onNavigate, sessionId }) {
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameId}`);
+      const response = await fetch(`/api/v1/games/${gameId}`);
       
       if (!response.ok) {
         alert('게임 데이터를 불러오지 못했습니다.');
@@ -123,7 +123,7 @@ function GamePage({ onNavigate, sessionId }) {
 
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -192,7 +192,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 스테이지 완료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -257,7 +257,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 게임 종료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/finish`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
