@@ -9,7 +9,7 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "ruff>=0.14.5",
     "sqlalchemy>=2.0.44",
-    "psycopg[binary]>=3.2.1",
+    "psycopg2-binary>=2.9.10",
     "uvicorn>=0.38.0",
     "alembic>=1.17.2",
 ]
