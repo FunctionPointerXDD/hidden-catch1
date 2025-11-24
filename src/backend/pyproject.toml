@@ -1,0 +1,48 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.121.2",
+    "pydantic-settings>=2.12.0",
+    "ruff>=0.14.5",
+    "sqlalchemy>=2.0.44",
+    "psycopg[binary]>=3.2.1",
+    "uvicorn>=0.38.0",
+    "alembic>=1.17.2",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+select = [
+    "E",  # pycodestyle (PEP 8)
+    "F",  # pyflakes
+    "W",  # warnings
+    "I",  # isort (import 정렬)
+    "C90",  # mccabe (복잡도)
+]
+
+ignore = [
+    "F401",  # 사용하지 않는 import 제거하지 않음
+]
+
+exclude = [
+    ".venv",
+    "__pycache__",
+    "migrations"
+]
+
+[tool.ruff.format]
+# Black 스타일 포매팅
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ruff.isort]
+known-first-party = ["app"]
+force-sort-within-sections = true
+split-on-trailing-comma = true
