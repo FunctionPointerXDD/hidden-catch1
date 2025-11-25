@@ -160,6 +160,10 @@ class StageResultResponse(BaseModel):
         ...,
         description="이번 스테이지 퍼즐의 차이 총 개수",
     )
+    next_stage_number: int | None = Field(
+        default=None,
+        description="다음 스테이지 번호 (없다면 None)",
+    )
     next_puzzle: PuzzleForGameResponse | None = Field(
         default=None,
         description="다음 스테이지에서 사용할 퍼즐 정보 (마지막 스테이지라면 None)",
