@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import boto3
+from celery import chain
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
@@ -28,6 +29,7 @@ from app.schemas.puzzle import (
     HitAttempt,
     PuzzleForGameResponse,
 )
+from app.worker.tasks import detect_objects_for_slot, edit_image_with_nano_banana
 
 
 def _build_s3_client() -> Any:
@@ -99,7 +101,16 @@ class GameService:
                 expires_at=expires_at,
                 s3_object_key=object_key,
             )
+
+            stage = GameStage(
+                game_id=game.id,
+                stage_number=slot_number,
+                status="waiting_upload",
+            )
             self.session.add(upload_slot)
+            self.session.add(stage)
+            self.session.flush()
+            upload_slot.stage_id = stage.id
 
             slots.append(
                 UploadSlot(
@@ -141,7 +152,10 @@ class GameService:
         slot.detected_objects = None
         slot.last_analyzed_at = None
         self.session.commit()
-        # detect_objects_for_slot.delay(slot.id)
+        chain(
+            detect_objects_for_slot.s(slot.id),
+            edit_image_with_nano_banana.s(),
+        ).delay()
 
         slots = (
             self.session.query(GameUploadSlot)
@@ -153,8 +167,8 @@ class GameService:
         game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
         if game is None:
             raise HTTPException(status_code=404, detail="Game not found")
-        if all_uploaded and game.status == "waiting_upload":
-            self._assign_dummy_puzzle_if_needed(game, slots)
+        # if all_uploaded and game.status == "waiting_upload":
+        #     game.status = "playing"
 
         status = [
             UploadSlotStatus(
@@ -353,6 +367,7 @@ class GameService:
             .one_or_none()
         )
         next_puzzle_schema = None
+        next_stage_number = next_stage.stage_number if next_stage else None
         if next_stage and next_stage.puzzle:
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
@@ -378,6 +393,7 @@ class GameService:
             current_score=stage.game.current_score,
             found_difference_count=stage.found_difference_count,
             total_difference_count=stage.total_difference_count or 0,
+            next_stage_number=next_stage_number,
             next_puzzle=next_puzzle_schema,
         )
 

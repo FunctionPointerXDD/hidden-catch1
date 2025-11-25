@@ -30,32 +30,94 @@
 }
 
 .upload-area {
-  border: 2px dashed #3498db;
+  border: 3px dashed #b0b0b0;
   border-radius: 10px;
-  padding: 30px;
+  padding: 50px 30px;
   text-align: center;
-  min-height: 300px;
+  min-height: 350px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  background-color: #ffffff;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.upload-area:hover:not(.disabled) {
+  background-color: #f0f8ff;
+  border-color: #3498db;
+}
+
+.upload-area.disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.upload-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  gap: 20px;
+}
+
+.upload-icon {
+  margin-bottom: 10px;
+}
+
+.upload-icon svg {
+  opacity: 0.6;
+}
+
+.upload-instruction {
+  font-size: 16px;
+  color: #7f8c8d;
+  margin: 0;
+  font-weight: 500;
 }
 
 .upload-label {
   display: inline-block;
-  padding: 15px 40px;
+  padding: 12px 30px;
   background-color: #3498db;
   color: white;
   border-radius: 8px;
   cursor: pointer;
-  font-size: 16px;
-  transition: background-color 0.3s;
-  margin-bottom: 20px;
-}
-
-.upload-label:hover:not(.disabled) {
-  background-color: #2980b9;
+  font-size: 14px;
+  transition: all 0.3s;
+  margin-top: 10px;
+  font-weight: 500;
+  pointer-events: none;
 }
 
 .upload-label.disabled {
   background-color: #95a5a6;
   cursor: not-allowed;
+}
+
+.upload-label-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.3s;
+  font-weight: 500;
+  min-height: 150px;
+  border: 2px dashed #3498db;
+  background-color: rgba(52, 152, 219, 0.1);
+  color: #3498db;
+}
+
+.upload-label-small:hover {
+  background-color: rgba(52, 152, 219, 0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(52, 152, 219, 0.2);
+  border-color: #2980b9;
 }
 
 .loading {
@@ -68,7 +130,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   gap: 15px;
-  margin-top: 20px;
+  width: 100%;
 }
 
 .preview-item {
@@ -114,6 +176,7 @@
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.3s;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 }
 
 .back-button {
@@ -123,6 +186,11 @@
 
 .back-button:hover {
   background-color: #7f8c8d;
+}
+
+.back-button:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
 
 .start-button {

@@ -11,7 +11,10 @@
   padding: 40px;
   background-color: rgba(255, 255, 255, 0.95);
   border-radius: 15px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  box-shadow: 
+    0 20px 60px rgba(0, 0, 0, 0.3),
+    0 10px 30px rgba(0, 0, 0, 0.2),
+    0 5px 15px rgba(0, 0, 0, 0.1);
 }
 
 .home-subtitle {
@@ -50,6 +53,11 @@
   box-shadow: 0 6px 12px rgba(0,0,0,0.2);
 }
 
+.play-button:active {
+  transform: scale(0.95);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
 .multiplay-button {
   background-color: #95a5a6;
   color: white;
@@ -58,4 +66,9 @@
 
 .multiplay-button:disabled {
   opacity: 0.6;
+}
+
+.multiplay-button:active:not(:disabled) {
+  transform: scale(0.95);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }

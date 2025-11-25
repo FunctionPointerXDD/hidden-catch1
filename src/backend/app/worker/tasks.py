@@ -78,12 +78,9 @@ def detect_objects_for_slot(slot_id: int):
             slot.last_analyzed_at = datetime.now()
             return
 
-        stmt = (
-            select(GameStage)
-            .where(GameStage.game_id == game.id)
-            .order_by(GameStage.stage_number)
+        existing_stage = (
+            session.get(GameStage, slot.stage_id) if slot.stage_id else None
         )
-        existing_stage = session.execute(stmt).scalars().first()
         puzzle = (
             existing_stage.puzzle if existing_stage and existing_stage.puzzle else None
         )
@@ -105,11 +102,13 @@ def detect_objects_for_slot(slot_id: int):
                 existing_stage = GameStage(
                     game_id=game.id,
                     puzzle_id=puzzle.id,
-                    stage_number=1,
+                    stage_number=slot.slot_number,
                     status="waiting_puzzle",
                     started_at=datetime.now(),
                 )
                 session.add(existing_stage)
+                session.flush()
+                slot.stage_id = existing_stage.id
                 game.status = "waiting_puzzle"
 
         detected = []
@@ -174,6 +173,7 @@ def detect_objects_for_slot(slot_id: int):
         slot.last_analyzed_at = datetime.now()
         if existing_stage:
             existing_stage.total_difference_count = len(detected)
+            existing_stage.status = "waiting_puzzle"
 
     return {"slot_id": slot.id, "detected": detected}
 
@@ -249,15 +249,17 @@ def edit_image_with_nano_banana(payload: dict):
             slot.last_analyzed_at = datetime.now()
             return
 
-        stage = (
-            session.execute(
-                select(GameStage)
-                .where(GameStage.game_id == game.id)
-                .order_by(GameStage.stage_number)
+        stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
+        if stage is None:
+            stage = GameStage(
+                game_id=game.id,
+                stage_number=slot.slot_number,
+                status="waiting_puzzle",
+                started_at=datetime.now(),
             )
-            .scalars()
-            .first()
-        )
+            session.add(stage)
+            session.flush()
+            slot.stage_id = stage.id
         if not stage or not stage.puzzle:
             slot.analysis_status = "failed"
             slot.analysis_error = "Puzzle not found"
@@ -399,15 +401,17 @@ def edit_image_with_imagen(payload: dict):
             slot.last_analyzed_at = datetime.now()
             return
 
-        stage = (
-            session.execute(
-                select(GameStage)
-                .where(GameStage.game_id == game.id)
-                .order_by(GameStage.stage_number)
+        stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
+        if stage is None:
+            stage = GameStage(
+                game_id=game.id,
+                stage_number=slot.slot_number,
+                status="waiting_puzzle",
+                started_at=datetime.now(),
             )
-            .scalars()
-            .first()
-        )
+            session.add(stage)
+            session.flush()
+            slot.stage_id = stage.id
         if not stage or not stage.puzzle:
             slot.analysis_status = "failed"
             slot.analysis_error = "Puzzle not found."
@@ -496,12 +500,9 @@ def process_uploaded_image(slot_id: int):
             slot.last_analyzed_at = datetime.now()
             return
 
-        stmt = (
-            select(GameStage)
-            .where(GameStage.game_id == game.id)
-            .order_by(GameStage.stage_number)
+        existing_stage = (
+            session.get(GameStage, slot.stage_id) if slot.stage_id else None
         )
-        existing_stage = session.execute(stmt).scalars().first()
         puzzle = (
             existing_stage.puzzle if existing_stage and existing_stage.puzzle else None
         )
@@ -523,11 +524,13 @@ def process_uploaded_image(slot_id: int):
                 stage = GameStage(
                     game_id=game.id,
                     puzzle_id=puzzle.id,
-                    stage_number=1,
+                    stage_number=slot.slot_number,
                     status="waiting_puzzle",
                     started_at=datetime.now(),
                 )
                 session.add(stage)
+                session.flush()
+                slot.stage_id = stage.id
                 game.status = "waiting_puzzle"
                 existing_stage = stage
 

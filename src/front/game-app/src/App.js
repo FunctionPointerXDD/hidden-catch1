@@ -27,6 +27,13 @@ function App() {
 
   return (
     <div className="App">
+      <div className="background-animation">
+        <div className="circle circle-1"></div>
+        <div className="circle circle-2"></div>
+        <div className="circle circle-3"></div>
+        <div className="circle circle-4"></div>
+        <div className="circle circle-5"></div>
+      </div>
       <Header onNavigate={setCurrentPage} />
       
       <main className="main-content">
