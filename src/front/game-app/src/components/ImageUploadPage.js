@@ -56,7 +56,7 @@ function ImageUploadPage({ onNavigate }) {
 
     try {
       // 1. 게임 생성 요청
-      const gameResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games`, {
+      const gameResponse = await fetch('/api/v1/games', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -104,7 +104,7 @@ function ImageUploadPage({ onNavigate }) {
         console.log(`S3 업로드 완료 (slot ${slot.slot})`);
 
         // 3. 업로드 완료 알림
-        const completeResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${game_id}/uploads/complete`, {
+        const completeResponse = await fetch(`/api/v1/games/${game_id}/uploads/complete`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -125,7 +125,7 @@ function ImageUploadPage({ onNavigate }) {
 
       // 4. 상태 폴링 (1초마다 확인)
       const pollStatus = async () => {
-        const statusResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${game_id}`);
+        const statusResponse = await fetch(`/api/v1/games/${game_id}`);
         
         if (!statusResponse.ok) {
           console.error('상태 조회 실패');

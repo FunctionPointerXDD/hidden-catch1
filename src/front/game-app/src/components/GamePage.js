@@ -41,7 +41,7 @@ function GamePage({ onNavigate, sessionId }) {
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameId}`);
+      const response = await fetch(`/api/v1/games/${gameId}`);
       
       if (!response.ok) {
         alert('게임 데이터를 불러오지 못했습니다.');
@@ -105,25 +105,9 @@ function GamePage({ onNavigate, sessionId }) {
 
     console.log(`클릭 좌표: (${clickX}, ${clickY}), 이미지 크기: ${puzzleData.width}x${puzzleData.height}`);
 
-    // 목숨 차감
-    const newLives = lives - 1;
-    setLives(newLives);
-
-    // 목숨이 0이 되면 게임오버 또는 다음 이미지로
-    if (newLives <= 0) {
-      clearInterval(timerRef.current);
-      alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
-      
-      // 목숨 소진으로 스테이지 완료 처리
-      setTimeout(async () => {
-        await handleStageComplete();
-      }, 500);
-      return;
-    }
-
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -155,7 +139,10 @@ function GamePage({ onNavigate, sessionId }) {
             handleAllCorrect();
           }
         } else {
-          // 오답 처리 - X표시 추가
+          // 오답 처리 - 목숨 차감 및 X표시 추가
+          const newLives = lives - 1;
+          setLives(newLives);
+          
           const wrongCoord = { x: clickX, y: clickY };
           setWrongAnswers([...wrongAnswers, wrongCoord]);
           // 1초 후 X표시 제거
@@ -164,6 +151,18 @@ function GamePage({ onNavigate, sessionId }) {
               coord.x !== clickX || coord.y !== clickY
             ));
           }, 1000);
+          
+          // 목숨이 0이 되면 게임오버 또는 다음 이미지로
+          if (newLives <= 0) {
+            clearInterval(timerRef.current);
+            alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
+            
+            // 목숨 소진으로 스테이지 완료 처리
+            setTimeout(async () => {
+              await handleStageComplete();
+            }, 500);
+            return;
+          }
         }
         
         // 게임 상태 확인
@@ -192,7 +191,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 스테이지 완료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -257,7 +256,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 게임 종료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/finish`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
