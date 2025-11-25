@@ -26,6 +26,9 @@ class GameUploadSlot(Base):
     )
     slot_number: Mapped[int] = mapped_column(Integer, nullable=False)
     presigned_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    stage_id: Mapped[int | None] = mapped_column(
+        ForeignKey("game_stages.id", ondelete="SET NULL"), nullable=True
+    )
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
