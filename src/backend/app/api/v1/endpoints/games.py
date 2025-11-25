@@ -30,7 +30,7 @@ def create_game(
 
 
 @router.post(
-    "/{game_id}/uploads:complete",
+    "/{game_id}/uploads/complete",
     response_model=UploadSlotsStatusResponse,
     status_code=status.HTTP_200_OK,
 )

@@ -1,7 +1,7 @@
 import React from 'react';
 import './Header.css';
 
-function Header() {
+function Header({ onNavigate }) {
   const handleLogin = () => {
     // TODO: 로그인 기능 구현
     console.log('로그인 클릭');
@@ -17,9 +17,15 @@ function Header() {
     console.log('랭크 클릭');
   };
 
+  const handleGoHome = () => {
+    if (onNavigate) {
+      onNavigate('home');
+    }
+  };
+
   return (
     <header className="header">
-      <div className="header-title">
+      <div className="header-title" onClick={handleGoHome}>
         <h1>Hidden Catch</h1>
       </div>
       <nav className="header-nav">
