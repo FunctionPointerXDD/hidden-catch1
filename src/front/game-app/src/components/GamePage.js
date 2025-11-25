@@ -217,7 +217,7 @@ function GamePage({ onNavigate, sessionId }) {
             setPuzzleData(data.next_puzzle);
             setGameData(prev => ({
               ...prev,
-              current_stage: data.stage_number + 1,
+              current_stage: data.next_stage_number,
               total_stages: data.total_stages,
               current_score: data.current_score
             }));
