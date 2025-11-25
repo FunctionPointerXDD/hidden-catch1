@@ -105,21 +105,6 @@ function GamePage({ onNavigate, sessionId }) {
 
     console.log(`클릭 좌표: (${clickX}, ${clickY}), 이미지 크기: ${puzzleData.width}x${puzzleData.height}`);
 
-    // 목숨 차감
-    const newLives = lives - 1;
-    setLives(newLives);
-
-    // 목숨이 0이 되면 게임오버 또는 다음 이미지로
-    if (newLives <= 0) {
-      clearInterval(timerRef.current);
-      alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
-      
-      // 목숨 소진으로 스테이지 완료 처리
-      setTimeout(async () => {
-        await handleStageComplete();
-      }, 500);
-      return;
-    }
 
     // 서버로 클릭 좌표 전송
     try {
@@ -156,6 +141,21 @@ function GamePage({ onNavigate, sessionId }) {
           }
         } else {
           // 오답 처리 - X표시 추가
+          // 목숨 차감
+          const newLives = lives - 1;
+          setLives(newLives);
+
+          // 목숨이 0이 되면 게임오버 또는 다음 이미지로
+          if (newLives <= 0) {
+            clearInterval(timerRef.current);
+            alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
+            
+            // 목숨 소진으로 스테이지 완료 처리
+            setTimeout(async () => {
+              await handleStageComplete();
+            }, 500);
+            return;
+          }
           const wrongCoord = { x: clickX, y: clickY };
           setWrongAnswers([...wrongAnswers, wrongCoord]);
           // 1초 후 X표시 제거
