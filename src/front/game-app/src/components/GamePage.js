@@ -1,5 +1,3 @@
-import React, { useState, useEffect, useRef } from 'react';
-import './GamePage.css';
 
 function GamePage({ onNavigate, sessionId }) {
   const [gameData, setGameData] = useState(null);
@@ -221,6 +219,7 @@ function GamePage({ onNavigate, sessionId }) {
               total_stages: data.total_stages,
               current_score: data.current_score
             }));
+            setCurrentStage(data.next_stage_number);
             
             // 상태 초기화
             const nextIndex = currentImageIndex + 1;
@@ -240,7 +239,7 @@ function GamePage({ onNavigate, sessionId }) {
             alert('모든 게임을 완료했습니다!');
             endGame();
           }
-        }, 1000);
+        }, 1000); // 1초 대기
       } else {
         console.error('스테이지 완료 요청 실패:', response.status);
         alert('스테이지 완료 처리에 실패했습니다.');
