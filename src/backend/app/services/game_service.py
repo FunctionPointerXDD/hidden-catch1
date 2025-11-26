@@ -32,7 +32,7 @@ from app.schemas.puzzle import (
 )
 from app.worker.tasks import (
     detect_objects_for_slot,
-    edit_image_with_imagen,
+    edit_image_with_imagen3,
     edit_image_with_nano_banana,
     process_uploaded_image,
     run_imagen_pipeline,
@@ -175,14 +175,13 @@ class GameService:
             raise HTTPException(status_code=404, detail="Upload slot not found")
 
         slot.uploaded = True
-        slot.s3_object_key = slot.s3_object_key or self._build_slot_key(
-            game_id, slot.slot_number
-        )
+        s3_key = slot.s3_object_key or self._build_slot_key(game_id, slot.slot_number)
+        slot.s3_object_key = s3_key
         slot.analysis_status = "pending"
         slot.analysis_error = None
         slot.detected_objects = None
         slot.last_analyzed_at = None
-        self._validate_upload_content_type(slot.s3_object_key)
+        self._validate_upload_content_type(s3_key)
         self.session.commit()
         # chain(
         #     detect_objects_for_slot.s(slot.id),
@@ -277,7 +276,16 @@ class GameService:
             game.stages[-1] if game.stages else None,
         )
         current_stage_number = current_stage.stage_number if current_stage else 0
-        puzzle = current_stage.puzzle if current_stage else None
+        # status가 playing일 때만 puzzle 반환
+        puzzle = (
+            current_stage.puzzle
+            if current_stage
+            and current_stage.status == "playing"
+            and current_stage.puzzle
+            and current_stage.puzzle.modified_image_url
+            != current_stage.puzzle.original_image_url
+            else None
+        )
         puzzle_schema = (
             PuzzleForGameResponse(
                 puzzle_id=puzzle.id,
@@ -405,7 +413,14 @@ class GameService:
             raise HTTPException(status_code=404, detail="Stage not found")
         next_puzzle_schema = None
         next_stage_number = next_stage.stage_number if next_stage else None
-        if next_stage and next_stage.puzzle:
+
+        if (
+            next_stage
+            and next_stage.puzzle
+            and next_stage.status == "playing"
+            and next_stage.puzzle.modified_image_url
+            != next_stage.puzzle.original_image_url
+        ):
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
                 original_image_url=self._build_view_url(
@@ -418,7 +433,6 @@ class GameService:
                 height=next_stage.puzzle.height,
                 total_difference_count=len(next_stage.puzzle.differences),
             )
-            next_stage.status = "playing"
             stage.game.status = "playing"
         elif next_stage:
             stage.game.status = "waiting_next_stage"
