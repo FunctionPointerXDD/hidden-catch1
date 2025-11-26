@@ -15,7 +15,7 @@ function GamePage({ onNavigate, sessionId }) {
   const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(10); // 목숨
   const [currentStage, setCurrentStage] = useState(0); // 현재 스테이지 번호
-  
+
   const originalImageRef = useRef(null);
   const modifiedImageRef = useRef(null);
   const timerRef = useRef(null);
@@ -41,8 +41,8 @@ function GamePage({ onNavigate, sessionId }) {
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     try {
-      const response = await fetch(`/api/v1/games/${gameId}`);
-      
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameId}`);
+
       if (!response.ok) {
         alert('게임 데이터를 불러오지 못했습니다.');
         return;
@@ -50,15 +50,15 @@ function GamePage({ onNavigate, sessionId }) {
 
       const data = await response.json();
       console.log('게임 데이터 로드:', data);
-      
+
       setGameData(data);
       setPuzzleData(data.puzzle);
       setCurrentStage(data.current_stage || 0);
       setUserScore(data.current_score || 0);
-      
+
       // 스테이지 시작 시간 기록
       stageStartTimeRef.current = Date.now();
-      
+
       // 타이머 시작
       startTimer();
     } catch (error) {
@@ -89,7 +89,7 @@ function GamePage({ onNavigate, sessionId }) {
   const handleTimeOut = async () => {
     clearInterval(timerRef.current);
     alert('시간 초과! 다음 게임으로 넘어갑니다.');
-    
+
     // 시간 초과로 스테이지 완료 처리
     await handleStageComplete();
   };
@@ -98,33 +98,71 @@ function GamePage({ onNavigate, sessionId }) {
   const handleImageClick = async (e) => {
     if (!puzzleData || !gameRoomId) return;
 
-    const rect = e.target.getBoundingClientRect();
-    // 실제 픽셀 좌표 계산 (정규화하지 않음)
-    const clickX = Math.round((e.clientX - rect.left) * (puzzleData.width / rect.width));
-    const clickY = Math.round((e.clientY - rect.top) * (puzzleData.height / rect.height));
+    const img = e.target;
+    const rect = img.getBoundingClientRect();
 
-    console.log(`클릭 좌표: (${clickX}, ${clickY}), 이미지 크기: ${puzzleData.width}x${puzzleData.height}`);
+    // 실제 이미지의 표시 크기 계산 (object-fit: contain 고려)
+    const imgWidth = img.naturalWidth;
+    const imgHeight = img.naturalHeight;
+    const containerWidth = rect.width;
+    const containerHeight = rect.height;
+
+    // 이미지 비율과 컨테이너 비율 계산
+    const imgRatio = imgWidth / imgHeight;
+    const containerRatio = containerWidth / containerHeight;
+
+    let displayWidth, displayHeight, offsetX, offsetY;
+
+    if (imgRatio > containerRatio) {
+      // 이미지가 더 넓음 - 좌우에 꽉 차고 상하에 여백
+      displayWidth = containerWidth;
+      displayHeight = containerWidth / imgRatio;
+      offsetX = 0;
+      offsetY = (containerHeight - displayHeight) / 2;
+    } else {
+      // 이미지가 더 높음 - 상하에 꽉 차고 좌우에 여백
+      displayWidth = containerHeight * imgRatio;
+      displayHeight = containerHeight;
+      offsetX = (containerWidth - displayWidth) / 2;
+      offsetY = 0;
+    }
+
+    // 클릭 위치가 실제 이미지 영역 내부인지 확인
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+
+    if (clickX < offsetX || clickX > offsetX + displayWidth ||
+      clickY < offsetY || clickY > offsetY + displayHeight) {
+      console.log('이미지 영역 밖 클릭 무시');
+      return;
+    }
+
+    // 실제 이미지 좌표로 변환
+    const imageX = Math.round((clickX - offsetX) * (imgWidth / displayWidth));
+    const imageY = Math.round((clickY - offsetY) * (imgHeight / displayHeight));
+
+    console.log(`클릭 좌표: (${imageX}, ${imageY}), 이미지 크기: ${imgWidth}x${imgHeight}`);
 
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          x: clickX,
-          y: clickY
+          x: imageX,
+          y: imageY
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
         console.log('답안 체크 응답:', data);
-        
+
         // 현재 점수 업데이트
         setUserScore(data.current_score);
-        
+
         // found_differences로 정답 표시 업데이트
         setCorrectAnswers(data.found_differences || []);
 
@@ -133,38 +171,38 @@ function GamePage({ onNavigate, sessionId }) {
           if (!data.is_already_found) {
             console.log('새로운 정답 발견!');
           }
-          
+
           // 모든 정답을 찾았는지 확인
           if (data.found_difference_count >= data.total_difference_count) {
             handleAllCorrect();
           }
         } else {
-          // 오답 처리 - 목숨 차감 및 X표시 추가
+          // 오답 처리 - X표시 추가
+          // 목숨 차감
           const newLives = lives - 1;
           setLives(newLives);
-          
-          const wrongCoord = { x: clickX, y: clickY };
-          setWrongAnswers([...wrongAnswers, wrongCoord]);
-          // 1초 후 X표시 제거
-          setTimeout(() => {
-            setWrongAnswers(prev => prev.filter(coord => 
-              coord.x !== clickX || coord.y !== clickY
-            ));
-          }, 1000);
-          
+
           // 목숨이 0이 되면 게임오버 또는 다음 이미지로
           if (newLives <= 0) {
             clearInterval(timerRef.current);
             alert('목숨을 모두 소진했습니다. 다음 게임으로 넘어갑니다.');
-            
+
             // 목숨 소진으로 스테이지 완료 처리
             setTimeout(async () => {
               await handleStageComplete();
             }, 500);
             return;
           }
+          const wrongCoord = { x: clickX, y: clickY };
+          setWrongAnswers([...wrongAnswers, wrongCoord]);
+          // 1초 후 X표시 제거
+          setTimeout(() => {
+            setWrongAnswers(prev => prev.filter(coord =>
+              coord.x !== clickX || coord.y !== clickY
+            ));
+          }, 1000);
         }
-        
+
         // 게임 상태 확인
         if (data.game_status === 'completed') {
           setIsGameOver(true);
@@ -188,10 +226,10 @@ function GamePage({ onNavigate, sessionId }) {
   const handleStageComplete = async () => {
     // 플레이 시간 계산 (밀리초)
     const playTimeMilliseconds = Date.now() - stageStartTimeRef.current;
-    
+
     try {
       // 스테이지 완료 요청
-      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -200,46 +238,26 @@ function GamePage({ onNavigate, sessionId }) {
           play_time_milliseconds: playTimeMilliseconds
         }),
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         console.log('스테이지 완료 응답:', data);
-        
-        // 점수 및 상태 업데이트
+
+        // 점수 업데이트
         setUserScore(data.current_score);
-        setCurrentStage(data.stage_number);
-        
-        setTimeout(() => {
-          // next_puzzle이 있으면 다음 스테이지로
-          if (data.next_puzzle) {
-            // 다음 퍼즐 데이터로 업데이트
-            setPuzzleData(data.next_puzzle);
-            setGameData(prev => ({
-              ...prev,
-              current_stage: data.stage_number + 1,
-              total_stages: data.total_stages,
-              current_score: data.current_score
-            }));
-            
-            // 상태 초기화
-            const nextIndex = currentImageIndex + 1;
-            setCurrentImageIndex(nextIndex);
-            setCorrectAnswers([]);
-            setWrongAnswers([]);
-            setLives(10);
-            setTimeLeft(180);
-            
-            // 스테이지 시작 시간 기록
-            stageStartTimeRef.current = Date.now();
-            
-            // 타이머 시작
-            startTimer();
-          } else {
-            // 더 이상 스테이지가 없으면 게임 종료
-            alert('모든 게임을 완료했습니다!');
-            endGame();
-          }
-        }, 1000);
+
+        // status가 "next_stage"면 polling 시작
+        if (data.status === 'waiting_next_stage') {
+          console.log('다음 퍼즐 준비 중... polling 시작');
+          pollNextPuzzle();
+        } else if (data.status === 'playing' && data.next_puzzle) {
+          // 바로 playing 상태면 다음 퍼즐로 전환
+          moveToNextStage(data);
+        } else if (!data.next_puzzle) {
+          // 더 이상 스테이지가 없으면 게임 종료
+          alert('모든 게임을 완료했습니다!');
+          endGame();
+        }
       } else {
         console.error('스테이지 완료 요청 실패:', response.status);
         alert('스테이지 완료 처리에 실패했습니다.');
@@ -250,13 +268,79 @@ function GamePage({ onNavigate, sessionId }) {
     }
   };
 
+  // 다음 퍼즐 준비 상태 polling
+  const pollNextPuzzle = () => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            play_time_milliseconds: 0  // polling이므로 시간은 0
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log('Polling 응답:', data);
+
+          // status가 "playing"으로 바뀌면 다음 스테이지로 전환
+          if (data.status === 'playing' && data.next_puzzle) {
+            clearInterval(pollInterval);
+            console.log('다음 퍼즐 준비 완료! 전환 시작');
+            moveToNextStage(data);
+          } else if (!data.next_puzzle) {
+            // 다음 퍼즐이 없으면 게임 종료
+            clearInterval(pollInterval);
+            alert('모든 게임을 완료했습니다!');
+            endGame();
+          }
+          // status가 여전히 "next_stage"면 계속 polling
+        } else {
+          console.error('Polling 실패:', response.status);
+        }
+      } catch (error) {
+        console.error('Polling 에러:', error);
+      }
+    }, 1000);  // 1초마다 polling
+  };
+
+  // 다음 스테이지로 전환
+  const moveToNextStage = (data) => {
+    // 다음 퍼즐 데이터로 업데이트
+    setPuzzleData(data.next_puzzle);
+    setCurrentStage(data.next_stage_number || currentStage);
+    setGameData(prev => ({
+      ...prev,
+      current_stage: data.next_stage_number,
+      total_stages: data.total_stages,
+      current_score: data.current_score
+    }));
+
+    // 상태 초기화
+    const nextIndex = currentImageIndex + 1;
+    setCurrentImageIndex(nextIndex);
+    setCorrectAnswers([]);
+    setWrongAnswers([]);
+    setLives(10);
+    setTimeLeft(180);
+
+    // 스테이지 시작 시간 기록
+    stageStartTimeRef.current = Date.now();
+
+    // 타이머 시작
+    startTimer();
+  };
+
   // 게임 종료
   const endGame = async () => {
     clearInterval(timerRef.current);
-    
+
     try {
       // 게임 종료 요청
-      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
+      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -265,11 +349,11 @@ function GamePage({ onNavigate, sessionId }) {
           play_time_milliseconds: 0
         }),
       });
-      
+
       if (response.ok) {
         const data = await response.json();
         console.log('게임 종료 응답:', data);
-        
+
         // 최종 점수 저장
         setFinalScore(data.final_score);
         setIsGameOver(true);
@@ -437,7 +521,7 @@ function GamePage({ onNavigate, sessionId }) {
         <p>찾은 개수: {correctAnswers.length} / {puzzleData?.total_difference_count || 0}</p>
         <p>현재 점수: {userScore}</p>
       </div>
-      
+
       <div className="game-footer">
         <button onClick={handleGoBack} className="back-button-game">
           돌아가기
