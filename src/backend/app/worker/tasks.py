@@ -112,6 +112,7 @@ def detect_objects_for_slot(slot_id: int):
                 game.status = "waiting_next_stage"
 
         detected: list[dict] = []
+        stored_differences: list[Difference] = []
         index = 0
 
         stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
@@ -154,15 +155,14 @@ def detect_objects_for_slot(slot_id: int):
 
             session.add(difference)
             session.flush()
+            stored_differences.append(difference)
 
         debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         draw = ImageDraw.Draw(debug_image)
-        for rect in detected:
-            ymin, xmin, ymax, xmax = rect["rect"]
-            x1 = int(xmin / 1000 * image_width)
-            y1 = int(ymin / 1000 * image_height)
-            x2 = int(xmax / 1000 * image_width)
-            y2 = int(ymax / 1000 * image_height)
+        for diff in stored_differences:
+            x1, y1 = diff.x, diff.y
+            x2 = x1 + diff.width
+            y2 = y1 + diff.height
             draw.rectangle(
                 [
                     (x1, y1),
@@ -171,6 +171,12 @@ def detect_objects_for_slot(slot_id: int):
                 outline="red",
                 width=3,
             )
+            if diff.label:
+                draw.text(
+                    (x1, max(0, y1 - 12)),
+                    diff.label,
+                    fill="red",
+                )
         debug_image.show(title=f"slot-{slot_id}-detections")
 
         slot.detected_objects = detected
@@ -588,29 +594,6 @@ def process_uploaded_image(slot_id: int):
             slot.last_analyzed_at = datetime.now()
             return
 
-        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        debug_draw = ImageDraw.Draw(debug_image)
-        for item in detection_results:
-            pixel_box = item.get("pixel_box")
-            if not pixel_box:
-                continue
-            debug_draw.rectangle(
-                [
-                    (pixel_box["xmin"], pixel_box["ymin"]),
-                    (pixel_box["xmax"], pixel_box["ymax"]),
-                ],
-                outline="red",
-                width=3,
-            )
-            label = item.get("name")
-            if label:
-                debug_draw.text(
-                    (pixel_box["xmin"], max(0, pixel_box["ymin"] - 12)),
-                    label,
-                    fill="red",
-                )
-        debug_image.show(title=f"slot-{slot_id}-detection")
-
         slot.detected_objects = []
 
         for item in detection_results:
@@ -647,6 +630,28 @@ def process_uploaded_image(slot_id: int):
 
         if existing_stage:
             existing_stage.total_difference_count = len(detected)
+
+        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        debug_draw = ImageDraw.Draw(debug_image)
+        for diff in detected:
+            x1, y1 = diff.x, diff.y
+            x2 = x1 + diff.width
+            y2 = y1 + diff.height
+            debug_draw.rectangle(
+                [
+                    (x1, y1),
+                    (x2, y2),
+                ],
+                outline="red",
+                width=3,
+            )
+            if diff.label:
+                debug_draw.text(
+                    (x1, max(0, y1 - 12)),
+                    diff.label,
+                    fill="red",
+                )
+        debug_image.show(title=f"slot-{slot_id}-detection")
 
         temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         try:

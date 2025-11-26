@@ -17,6 +17,10 @@ class UploadSlot(BaseModel):
         ..., description="클라이언트가 이미지를 PUT할 presigned URL"
     )
     expires_at: datetime = Field(..., description="presigned URL 만료 시각")
+    accepted_content_types: list[str] = Field(
+        default_factory=list,
+        description="허용된 업로드 Content-Type 목록",
+    )
 
 
 class UploadSlotStatus(BaseModel):

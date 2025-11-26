@@ -182,9 +182,8 @@ def modify_image_with_imagen(original_image_path, detection_results):
         reference_id=2,
         reference_image=types.Image(image_bytes=mask_bytes, mime_type="image/png"),
         config=types.MaskReferenceConfig(
-            # MASK_MODE_FOREGROUND: 마스크의 흰색(255) 부분을 수정함
-            mask_mode="MASK_MODE_FOREGROUND",
-            mask_dilation=0.05,  # 영역을 살짝(5%) 넓혀 경계선 어색함 방지
+            mask_mode=types.MaskReferenceMode.MASK_MODE_USER_PROVIDED,
+            mask_dilation=0,  # 영역을 살짝(5%) 넓혀 경계선 어색함 방지
         ),
     )
 
@@ -196,7 +195,7 @@ def modify_image_with_imagen(original_image_path, detection_results):
             prompt=final_prompt,
             reference_images=[raw_ref, mask_ref],
             config=types.EditImageConfig(
-                edit_mode="EDIT_MODE_INPAINT_INSERTION",
+                edit_mode=types.EditMode.EDIT_MODE_INPAINT_INSERTION,
                 number_of_images=1,
                 output_mime_type="image/png",
             ),

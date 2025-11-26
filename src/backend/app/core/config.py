@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     aws_s3_bucket_name: str = ""
     aws_s3_upload_prefix: str = "uploads"
     aws_s3_presign_ttl_seconds: int = 900
+    allowed_upload_content_types: list[str] = ["image/png", "image/jpeg"]
 
     # Celery
     celery_broker_url: str = "redis://localhost:6379/0"
