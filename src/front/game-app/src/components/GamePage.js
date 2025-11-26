@@ -205,42 +205,21 @@ function GamePage({ onNavigate, sessionId }) {
         const data = await response.json();
         console.log('스테이지 완료 응답:', data);
         
-        // 점수 및 상태 업데이트
+        // 점수 업데이트
         setUserScore(data.current_score);
-        setCurrentStage(data.stage_number);
         
-        setTimeout(() => {
-          // next_puzzle이 있으면 다음 스테이지로
-          if (data.next_puzzle) {
-            // 다음 퍼즐 데이터로 업데이트
-            setPuzzleData(data.next_puzzle);
-            setGameData(prev => ({
-              ...prev,
-              current_stage: data.stage_number + 1,
-              total_stages: data.total_stages,
-              current_score: data.current_score
-            }));
-			setCurrentStage(data.next_stage_number);
-            
-            // 상태 초기화
-            const nextIndex = currentImageIndex + 1;
-            setCurrentImageIndex(nextIndex);
-            setCorrectAnswers([]);
-            setWrongAnswers([]);
-            setLives(10);
-            setTimeLeft(180);
-            
-            // 스테이지 시작 시간 기록
-            stageStartTimeRef.current = Date.now();
-            
-            // 타이머 시작
-            startTimer();
-          } else {
-            // 더 이상 스테이지가 없으면 게임 종료
-            alert('모든 게임을 완료했습니다!');
-            endGame();
-          }
-        }, 1000);
+        // status가 "next_stage"면 polling 시작
+        if (data.status === 'next_stage') {
+          console.log('다음 퍼즐 준비 중... polling 시작');
+          pollNextPuzzle();
+        } else if (data.status === 'playing' && data.next_puzzle) {
+          // 바로 playing 상태면 다음 퍼즐로 전환
+          moveToNextStage(data);
+        } else if (!data.next_puzzle) {
+          // 더 이상 스테이지가 없으면 게임 종료
+          alert('모든 게임을 완료했습니다!');
+          endGame();
+        }
       } else {
         console.error('스테이지 완료 요청 실패:', response.status);
         alert('스테이지 완료 처리에 실패했습니다.');
@@ -249,6 +228,72 @@ function GamePage({ onNavigate, sessionId }) {
       console.error('스테이지 완료 에러:', error);
       alert('스테이지 완료 중 오류가 발생했습니다.');
     }
+  };
+
+  // 다음 퍼즐 준비 상태 polling
+  const pollNextPuzzle = () => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            play_time_milliseconds: 0  // polling이므로 시간은 0
+          }),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log('Polling 응답:', data);
+
+          // status가 "playing"으로 바뀌면 다음 스테이지로 전환
+          if (data.status === 'playing' && data.next_puzzle) {
+            clearInterval(pollInterval);
+            console.log('다음 퍼즐 준비 완료! 전환 시작');
+            moveToNextStage(data);
+          } else if (!data.next_puzzle) {
+            // 다음 퍼즐이 없으면 게임 종료
+            clearInterval(pollInterval);
+            alert('모든 게임을 완료했습니다!');
+            endGame();
+          }
+          // status가 여전히 "next_stage"면 계속 polling
+        } else {
+          console.error('Polling 실패:', response.status);
+        }
+      } catch (error) {
+        console.error('Polling 에러:', error);
+      }
+    }, 1000);  // 1초마다 polling
+  };
+
+  // 다음 스테이지로 전환
+  const moveToNextStage = (data) => {
+    // 다음 퍼즐 데이터로 업데이트
+    setPuzzleData(data.next_puzzle);
+    setCurrentStage(data.next_stage_number || currentStage);
+    setGameData(prev => ({
+      ...prev,
+      current_stage: data.next_stage_number,
+      total_stages: data.total_stages,
+      current_score: data.current_score
+    }));
+    
+    // 상태 초기화
+    const nextIndex = currentImageIndex + 1;
+    setCurrentImageIndex(nextIndex);
+    setCorrectAnswers([]);
+    setWrongAnswers([]);
+    setLives(10);
+    setTimeLeft(180);
+    
+    // 스테이지 시작 시간 기록
+    stageStartTimeRef.current = Date.now();
+    
+    // 타이머 시작
+    startTimer();
   };
 
   // 게임 종료
