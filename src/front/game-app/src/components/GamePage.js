@@ -246,7 +246,6 @@ function GamePage({ onNavigate, sessionId }) {
         
         // status가 "next_stage"면 polling 시작
         if (data.status === 'waiting_next_stage') {
-        if (data.status === 'waiting_next_stage') {
           console.log('다음 퍼즐 준비 중... polling 시작');
           pollNextPuzzle();
         } else if (data.status === 'playing' && data.next_puzzle) {
