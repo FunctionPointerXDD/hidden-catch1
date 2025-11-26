@@ -4,6 +4,7 @@ import './ImageUploadPage.css';
 function ImageUploadPage({ onNavigate }) {
   const [uploadedImages, setUploadedImages] = useState([]);
   const [previews, setPreviews] = useState([]);
+  const [isWaitingGame, setIsWaitingGame] = useState(false); // 게임 준비 대기 상태
   const MAX_IMAGES = 5;
   
 
@@ -55,6 +56,8 @@ function ImageUploadPage({ onNavigate }) {
     }
 
     try {
+      setIsWaitingGame(true); // 대기 상태 시작
+      
       // 1. 게임 생성 요청
       const gameResponse = await fetch('/api/v1/games', {
         method: 'POST',
@@ -137,6 +140,7 @@ function ImageUploadPage({ onNavigate }) {
 
         if (statusData.status === 'playing') {
           // 게임 시작 가능 상태
+          setIsWaitingGame(false);
           onNavigate('game');
         } else {
           // 아직 준비 중이면 1초 후 재시도
@@ -150,6 +154,7 @@ function ImageUploadPage({ onNavigate }) {
     } catch (error) {
       console.error('게임 시작 에러:', error);
       alert('게임 시작 중 오류가 발생했습니다.');
+      setIsWaitingGame(false); // 에러 시 대기 상태 해제
     }
   };
 
@@ -162,6 +167,16 @@ function ImageUploadPage({ onNavigate }) {
 
   return (
     <div className="upload-page">
+      {isWaitingGame && (
+        <div className="waiting-overlay">
+          <div className="waiting-content">
+            <div className="spinner"></div>
+            <h3>게임 준비 중...</h3>
+            <p>AI가 퍼즐을 생성하고 있습니다. 잠시만 기다려주세요.</p>
+          </div>
+        </div>
+      )}
+      
       <div className="upload-content">
         <h2>이미지 업로드</h2>
         <p className="upload-info">최대 {MAX_IMAGES}장까지 업로드 가능 (jpg, jpeg, png)</p>
