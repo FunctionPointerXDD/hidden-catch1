@@ -98,23 +98,61 @@ function GamePage({ onNavigate, sessionId }) {
   const handleImageClick = async (e) => {
     if (!puzzleData || !gameRoomId) return;
 
-    const rect = e.target.getBoundingClientRect();
-    // 실제 픽셀 좌표 계산 (정규화하지 않음)
-    const clickX = Math.round((e.clientX - rect.left) * (puzzleData.width / rect.width));
-    const clickY = Math.round((e.clientY - rect.top) * (puzzleData.height / rect.height));
+    const img = e.target;
+    const rect = img.getBoundingClientRect();
+    
+    // 실제 이미지의 표시 크기 계산 (object-fit: contain 고려)
+    const imgWidth = img.naturalWidth;
+    const imgHeight = img.naturalHeight;
+    const containerWidth = rect.width;
+    const containerHeight = rect.height;
+    
+    // 이미지 비율과 컨테이너 비율 계산
+    const imgRatio = imgWidth / imgHeight;
+    const containerRatio = containerWidth / containerHeight;
+    
+    let displayWidth, displayHeight, offsetX, offsetY;
+    
+    if (imgRatio > containerRatio) {
+      // 이미지가 더 넓음 - 좌우에 꽉 차고 상하에 여백
+      displayWidth = containerWidth;
+      displayHeight = containerWidth / imgRatio;
+      offsetX = 0;
+      offsetY = (containerHeight - displayHeight) / 2;
+    } else {
+      // 이미지가 더 높음 - 상하에 꽉 차고 좌우에 여백
+      displayWidth = containerHeight * imgRatio;
+      displayHeight = containerHeight;
+      offsetX = (containerWidth - displayWidth) / 2;
+      offsetY = 0;
+    }
+    
+    // 클릭 위치가 실제 이미지 영역 내부인지 확인
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    if (clickX < offsetX || clickX > offsetX + displayWidth ||
+        clickY < offsetY || clickY > offsetY + displayHeight) {
+      console.log('이미지 영역 밖 클릭 무시');
+      return;
+    }
+    
+    // 실제 이미지 좌표로 변환
+    const imageX = Math.round((clickX - offsetX) * (imgWidth / displayWidth));
+    const imageY = Math.round((clickY - offsetY) * (imgHeight / displayHeight));
 
-    console.log(`클릭 좌표: (${clickX}, ${clickY}), 이미지 크기: ${puzzleData.width}x${puzzleData.height}`);
+    console.log(`클릭 좌표: (${imageX}, ${imageY}), 이미지 크기: ${imgWidth}x${imgHeight}`);
 
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          x: clickX,
-          y: clickY
+          x: imageX,
+          y: imageY
         }),
       });
 
@@ -209,7 +247,7 @@ function GamePage({ onNavigate, sessionId }) {
         setUserScore(data.current_score);
         
         // status가 "next_stage"면 polling 시작
-        if (data.status === 'next_stage') {
+        if (data.status === 'waiting_next_stage') {
           console.log('다음 퍼즐 준비 중... polling 시작');
           pollNextPuzzle();
         } else if (data.status === 'playing' && data.next_puzzle) {
