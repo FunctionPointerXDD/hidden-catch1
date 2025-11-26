@@ -15,11 +15,67 @@ function GamePage({ onNavigate, sessionId }) {
   const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(10); // 목숨
   const [currentStage, setCurrentStage] = useState(0); // 현재 스테이지 번호
+  const [imageLayout, setImageLayout] = useState(null); // 이미지 레이아웃 정보 (여백 계산)
   
   const originalImageRef = useRef(null);
   const modifiedImageRef = useRef(null);
   const timerRef = useRef(null);
   const stageStartTimeRef = useRef(null); // 스테이지 시작 시간
+
+  // 이미지 로드 시 레이아웃 계산
+  useEffect(() => {
+    const calculateLayout = () => {
+      const img = originalImageRef.current;
+      if (!img || !puzzleData) return;
+
+      const rect = img.getBoundingClientRect();
+      const imgWidth = img.naturalWidth;
+      const imgHeight = img.naturalHeight;
+      const containerWidth = rect.width;
+      const containerHeight = rect.height;
+
+      const imgRatio = imgWidth / imgHeight;
+      const containerRatio = containerWidth / containerHeight;
+
+      let displayWidth, displayHeight, offsetX, offsetY;
+
+      if (imgRatio > containerRatio) {
+        displayWidth = containerWidth;
+        displayHeight = containerWidth / imgRatio;
+        offsetX = 0;
+        offsetY = (containerHeight - displayHeight) / 2;
+      } else {
+        displayWidth = containerHeight * imgRatio;
+        displayHeight = containerHeight;
+        offsetX = (containerWidth - displayWidth) / 2;
+        offsetY = 0;
+      }
+
+      setImageLayout({
+        displayWidth,
+        displayHeight,
+        offsetX,
+        offsetY,
+        containerWidth,
+        containerHeight,
+        imgWidth,
+        imgHeight
+      });
+    };
+
+    if (puzzleData && originalImageRef.current) {
+      // 이미지 로드 완료 후 계산
+      if (originalImageRef.current.complete) {
+        calculateLayout();
+      } else {
+        originalImageRef.current.onload = calculateLayout;
+      }
+      
+      // 윈도우 리사이즈 시 재계산
+      window.addEventListener('resize', calculateLayout);
+      return () => window.removeEventListener('resize', calculateLayout);
+    }
+  }, [puzzleData]);
 
   // 게임 초기화
   useEffect(() => {
@@ -181,12 +237,13 @@ function GamePage({ onNavigate, sessionId }) {
           const newLives = lives - 1;
           setLives(newLives);
           
-          const wrongCoord = { x: clickX, y: clickY };
+          // 오답 좌표를 실제 이미지 좌표로 저장 (imageX, imageY)
+          const wrongCoord = { x: imageX, y: imageY };
           setWrongAnswers([...wrongAnswers, wrongCoord]);
           // 1초 후 X표시 제거
           setTimeout(() => {
             setWrongAnswers(prev => prev.filter(coord => 
-              coord.x !== clickX || coord.y !== clickY
+              coord.x !== imageX || coord.y !== imageY
             ));
           }, 1000);
           
@@ -449,31 +506,43 @@ function GamePage({ onNavigate, sessionId }) {
               className="game-image"
             />
             {/* 정답 표시 - rect 형태 */}
-            {correctAnswers.map((diff, index) => (
-              <div
-                key={index}
-                className="correct-mark"
-                style={{
-                  left: `${(diff.x / puzzleData.width) * 100}%`,
-                  top: `${(diff.y / puzzleData.height) * 100}%`,
-                  width: `${(diff.width / puzzleData.width) * 100}%`,
-                  height: `${(diff.height / puzzleData.height) * 100}%`,
-                }}
-              />
-            ))}
+            {imageLayout && correctAnswers.map((diff, index) => {
+              const left = (diff.x / imageLayout.imgWidth) * imageLayout.displayWidth + imageLayout.offsetX;
+              const top = (diff.y / imageLayout.imgHeight) * imageLayout.displayHeight + imageLayout.offsetY;
+              const width = (diff.width / imageLayout.imgWidth) * imageLayout.displayWidth;
+              const height = (diff.height / imageLayout.imgHeight) * imageLayout.displayHeight;
+              
+              return (
+                <div
+                  key={index}
+                  className="correct-mark"
+                  style={{
+                    left: `${(left / imageLayout.containerWidth) * 100}%`,
+                    top: `${(top / imageLayout.containerHeight) * 100}%`,
+                    width: `${(width / imageLayout.containerWidth) * 100}%`,
+                    height: `${(height / imageLayout.containerHeight) * 100}%`,
+                  }}
+                />
+              );
+            })}
             {/* 오답 X표시 */}
-            {wrongAnswers.map((coord, index) => (
-              <div
-                key={`wrong-${index}`}
-                className="wrong-mark"
-                style={{
-                  left: `${(coord.x / puzzleData.width) * 100}%`,
-                  top: `${(coord.y / puzzleData.height) * 100}%`,
-                }}
-              >
-                ✕
-              </div>
-            ))}
+            {imageLayout && wrongAnswers.map((coord, index) => {
+              const left = (coord.x / imageLayout.imgWidth) * imageLayout.displayWidth + imageLayout.offsetX;
+              const top = (coord.y / imageLayout.imgHeight) * imageLayout.displayHeight + imageLayout.offsetY;
+              
+              return (
+                <div
+                  key={`wrong-${index}`}
+                  className="wrong-mark"
+                  style={{
+                    left: `${(left / imageLayout.containerWidth) * 100}%`,
+                    top: `${(top / imageLayout.containerHeight) * 100}%`,
+                  }}
+                >
+                  ✕
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -488,31 +557,43 @@ function GamePage({ onNavigate, sessionId }) {
               className="game-image"
             />
             {/* 정답 표시 - rect 형태 */}
-            {correctAnswers.map((diff, index) => (
-              <div
-                key={index}
-                className="correct-mark"
-                style={{
-                  left: `${(diff.x / puzzleData.width) * 100}%`,
-                  top: `${(diff.y / puzzleData.height) * 100}%`,
-                  width: `${(diff.width / puzzleData.width) * 100}%`,
-                  height: `${(diff.height / puzzleData.height) * 100}%`,
-                }}
-              />
-            ))}
+            {imageLayout && correctAnswers.map((diff, index) => {
+              const left = (diff.x / imageLayout.imgWidth) * imageLayout.displayWidth + imageLayout.offsetX;
+              const top = (diff.y / imageLayout.imgHeight) * imageLayout.displayHeight + imageLayout.offsetY;
+              const width = (diff.width / imageLayout.imgWidth) * imageLayout.displayWidth;
+              const height = (diff.height / imageLayout.imgHeight) * imageLayout.displayHeight;
+              
+              return (
+                <div
+                  key={index}
+                  className="correct-mark"
+                  style={{
+                    left: `${(left / imageLayout.containerWidth) * 100}%`,
+                    top: `${(top / imageLayout.containerHeight) * 100}%`,
+                    width: `${(width / imageLayout.containerWidth) * 100}%`,
+                    height: `${(height / imageLayout.containerHeight) * 100}%`,
+                  }}
+                />
+              );
+            })}
             {/* 오답 X표시 */}
-            {wrongAnswers.map((coord, index) => (
-              <div
-                key={`wrong-${index}`}
-                className="wrong-mark"
-                style={{
-                  left: `${(coord.x / puzzleData.width) * 100}%`,
-                  top: `${(coord.y / puzzleData.height) * 100}%`,
-                }}
-              >
-                ✕
-              </div>
-            ))}
+            {imageLayout && wrongAnswers.map((coord, index) => {
+              const left = (coord.x / imageLayout.imgWidth) * imageLayout.displayWidth + imageLayout.offsetX;
+              const top = (coord.y / imageLayout.imgHeight) * imageLayout.displayHeight + imageLayout.offsetY;
+              
+              return (
+                <div
+                  key={`wrong-${index}`}
+                  className="wrong-mark"
+                  style={{
+                    left: `${(left / imageLayout.containerWidth) * 100}%`,
+                    top: `${(top / imageLayout.containerHeight) * 100}%`,
+                  }}
+                >
+                  ✕
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
