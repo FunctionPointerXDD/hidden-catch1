@@ -121,8 +121,7 @@ function GamePage({ onNavigate, sessionId }) {
       console.log('게임 데이터 로드:', data);
       
       // 새로고침으로 인한 재로드 감지
-      const isReload = performance.navigation.type === 1 || 
-                       performance.getEntriesByType('navigation')[0]?.type === 'reload';
+      const isReload = performance.getEntriesByType('navigation')[0]?.type === 'reload';
       
       if (isReload && data.status === 'playing') {
         // 새로고침 경고 및 게임 재시작 확인
