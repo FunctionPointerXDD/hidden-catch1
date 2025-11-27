@@ -159,10 +159,6 @@ def modify_image_with_imagen(original_image_path, detection_results):
     # ============================================================
     mask_image = mask_image.convert("L").point(lambda x: 255 if x > 100 else 0)
 
-    # (디버깅용) 마스크가 제대로 만들어졌는지 확인하고 싶다면 아래 주석 해제
-    # mask_image.save("debug_mask.png")
-    mask_image.show()
-
     original_bytes_io = io.BytesIO()
     mask_bytes_io = io.BytesIO()
 
