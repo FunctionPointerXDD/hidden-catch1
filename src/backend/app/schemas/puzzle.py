@@ -29,6 +29,8 @@ class FoundDifference(BaseModel):
     difference_id: int = Field(..., description="Rect ID")
     x: float = Field(..., description="Rect 중심 좌표 X")
     y: float = Field(..., description="Rect 중심 좌표 Y")
+    width: float = Field(..., description="Rect 너비")
+    height: float = Field(..., description="Rect 높이")
     label: str | None = Field(..., description="탐지된 오브젝트")
     hit_at: datetime | None = Field(..., description="해당 Rect를 맞춘 시각")
 

@@ -498,6 +498,8 @@ class GameService:
                     difference_id=hit.difference.id,
                     x=hit.difference.x + hit.difference.width / 2,
                     y=hit.difference.y + hit.difference.height / 2,
+                    width=hit.difference.width,
+                    height=hit.difference.height,
                     label=hit.difference.label,
                     hit_at=hit.hit_at,
                 )
