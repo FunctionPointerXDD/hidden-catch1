@@ -496,8 +496,8 @@ class GameService:
             found_infos.append(
                 FoundDifference(
                     difference_id=hit.difference.id,
-                    x=hit.difference.x + hit.difference.width / 2,
-                    y=hit.difference.y + hit.difference.height / 2,
+                    x=hit.difference.x,
+                    y=hit.difference.y,
                     width=hit.difference.width,
                     height=hit.difference.height,
                     label=hit.difference.label,
