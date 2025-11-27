@@ -100,7 +100,6 @@
   /* width와 height는 인라인 스타일로 동적 설정 */
   border: 3px solid #e74c3c;
   border-radius: 8px; /* 직사각형 모서리 둥글게 */
-  transform: translate(0, 0); /* 중앙 정렬 제거 - left/top이 좌상단 기준 */
   pointer-events: none;
   animation: markAppear 0.3s ease-out;
   background-color: rgba(231, 76, 60, 0.2);
@@ -130,6 +129,7 @@
   }
   50% {
     transform: scale(1.1);
+    opacity: 0.8;
   }
   100% {
     transform: scale(1);
