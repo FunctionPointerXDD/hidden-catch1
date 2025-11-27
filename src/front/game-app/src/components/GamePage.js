@@ -352,7 +352,7 @@ function GamePage({ onNavigate, sessionId }) {
         } else if (data.status === 'playing' && data.next_puzzle) {
           // 바로 playing 상태면 다음 퍼즐로 전환
           moveToNextStage(data);
-        } else if (data.status == 'finished' && !data.next_puzzle) {
+        } else if (data.status === 'finished' && !data.next_puzzle) {
           // 더 이상 스테이지가 없으면 게임 종료
           alert('모든 게임을 완료했습니다!');
           endGame();
@@ -390,7 +390,7 @@ function GamePage({ onNavigate, sessionId }) {
             clearInterval(pollInterval);
             console.log('다음 퍼즐 준비 완료! 전환 시작');
             moveToNextStage(data);
-          } else if (data.status == 'finished' && !data.next_puzzle) {
+          } else if (data.status === 'finished' && !data.next_puzzle) {
             // 다음 퍼즐이 없으면 게임 종료
             clearInterval(pollInterval);
             alert('모든 게임을 완료했습니다!');
