@@ -12,7 +12,6 @@ function GamePage({ onNavigate, sessionId }) {
   const [isGameOver, setIsGameOver] = useState(false);
   const [userScore, setUserScore] = useState(0); // 스테이지 점수
   const [finalScore, setFinalScore] = useState(0); // 최종 점수
-  const [isWaiting, setIsWaiting] = useState(false);
   const [lives, setLives] = useState(10); // 목숨
   const [currentStage, setCurrentStage] = useState(0); // 현재 스테이지 번호
   const [imageLayout, setImageLayout] = useState(null); // 이미지 레이아웃 정보 (여백 계산)
@@ -88,8 +87,8 @@ function GamePage({ onNavigate, sessionId }) {
 
     // 새로고침 감지 및 경고
     const handleBeforeUnload = (e) => {
-      // 게임 진행 중일 때만 경고
-      if (gameRoomId && !isGameOver) {
+      // 게임 데이터가 로드되고 게임이 진행 중일 때만 경고
+      if (gameRoomId && puzzleData && !isGameOver) {
         e.preventDefault();
         e.returnValue = '게임 진행 중입니다. 새로고침하면 현재 진행 상태가 초기화됩니다.';
         return e.returnValue;
@@ -105,7 +104,7 @@ function GamePage({ onNavigate, sessionId }) {
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameRoomId, isGameOver]);
+  }, [gameRoomId, puzzleData, isGameOver]);
 
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
@@ -121,8 +120,7 @@ function GamePage({ onNavigate, sessionId }) {
       console.log('게임 데이터 로드:', data);
       
       // 새로고침으로 인한 재로드 감지
-      const isReload = performance.navigation.type === 1 || 
-                       performance.getEntriesByType('navigation')[0]?.type === 'reload';
+      const isReload = performance.getEntriesByType('navigation')[0]?.type === 'reload';
       
       if (isReload && data.status === 'playing') {
         // 새로고침 경고 및 게임 재시작 확인
@@ -149,7 +147,17 @@ function GamePage({ onNavigate, sessionId }) {
       
       // found_differences가 있으면 복구 (서버가 제공하는 경우)
       if (data.found_differences && Array.isArray(data.found_differences)) {
-        setCorrectAnswers(data.found_differences);
+        const processedDifferences = data.found_differences.map(diff => {
+          if (!diff.width || !diff.height) {
+            return {
+              ...diff,
+              width: diff.box_width || 100,
+              height: diff.box_height || 100
+            };
+          }
+          return diff;
+        });
+        setCorrectAnswers(processedDifferences);
       } else {
         setCorrectAnswers([]);
       }
@@ -257,12 +265,25 @@ function GamePage({ onNavigate, sessionId }) {
       if (response.ok) {
         const data = await response.json();
         console.log('답안 체크 응답:', data);
+        console.log('found_differences:', data.found_differences);
         
         // 현재 점수 업데이트
         setUserScore(data.current_score);
         
-        // found_differences로 정답 표시 업데이트
-        setCorrectAnswers(data.found_differences || []);
+        // found_differences로 정답 표시 업데이트 (width/height 없으면 추가)
+        const processedDifferences = (data.found_differences || []).map(diff => {
+          // width와 height가 없으면 기본값 설정 (박스 크기)
+          if (!diff.width || !diff.height) {
+            return {
+              ...diff,
+              width: diff.box_width || 100,
+              height: diff.box_height || 100
+            };
+          }
+          return diff;
+        });
+        console.log('처리된 differences:', processedDifferences);
+        setCorrectAnswers(processedDifferences);
 
         if (data.is_correct) {
           // 정답 처리
@@ -523,18 +544,6 @@ function GamePage({ onNavigate, sessionId }) {
           <button onClick={handleGoBack} className="back-button-game">
             돌아가기
           </button>
-        </div>
-      </div>
-    );
-  }
-
-  // 대기 화면
-  if (isWaiting) {
-    return (
-      <div className="game-page">
-        <div className="waiting">
-          <h2>다음 게임 준비 중...</h2>
-          <div className="spinner"></div>
         </div>
       </div>
     );

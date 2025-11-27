@@ -32,7 +32,10 @@ class Settings(BaseSettings):
 
     # GCP
     gcp_project_id: str = ""
+<<<<<<< HEAD
     google_application_credentials: str | None = None
+=======
+>>>>>>> origin/develop
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"

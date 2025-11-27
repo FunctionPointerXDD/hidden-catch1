@@ -20,10 +20,6 @@ def create_app() -> FastAPI:
         allow_credentials=True,
     )
 
-    @app.get("/healthz")
-    async def health_check():
-        return {"status": "ok"}
-
     app.include_router(api_router, prefix="/api/v1")
 
     return app

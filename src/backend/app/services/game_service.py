@@ -30,12 +30,7 @@ from app.schemas.puzzle import (
     HitAttempt,
     PuzzleForGameResponse,
 )
-from app.worker.tasks import (
-    detect_objects_for_slot,
-    edit_image_with_nano_banana,
-    process_uploaded_image,
-    run_imagen_pipeline,
-)
+from app.worker.tasks import run_imagen_pipeline
 
 
 def _build_s3_client() -> Any:
@@ -174,19 +169,15 @@ class GameService:
             raise HTTPException(status_code=404, detail="Upload slot not found")
 
         slot.uploaded = True
-        s3_key = slot.s3_object_key or self._build_slot_key(game_id, slot.slot_number)
-        slot.s3_object_key = s3_key
+        slot.s3_object_key = slot.s3_object_key or self._build_slot_key(
+            game_id, slot.slot_number
+        )
         slot.analysis_status = "pending"
         slot.analysis_error = None
         slot.detected_objects = None
         slot.last_analyzed_at = None
-        self._validate_upload_content_type(s3_key)
+        self._validate_upload_content_type(slot.s3_object_key)
         self.session.commit()
-        # chain(
-        #     detect_objects_for_slot.s(slot.id),
-        #     edit_image_with_nano_banana.s(),
-        # ).delay()
-        # process_uploaded_image.delay(slot.id)
         run_imagen_pipeline.delay(slot.id)
 
         slots = (
@@ -275,14 +266,12 @@ class GameService:
             game.stages[-1] if game.stages else None,
         )
         current_stage_number = current_stage.stage_number if current_stage else 0
-        # status가 playing일 때만 puzzle 반환
         puzzle = (
             current_stage.puzzle
             if current_stage
             and current_stage.status == "playing"
             and current_stage.puzzle
-            and current_stage.puzzle.modified_image_url
-            != current_stage.puzzle.original_image_url
+            and current_stage.puzzle.is_completed
             else None
         )
         puzzle_schema = (
@@ -399,6 +388,9 @@ class GameService:
         if stage.total_difference_count is None and stage.puzzle is not None:
             stage.total_difference_count = len(stage.puzzle.differences)
 
+        total_stages = len(stage.game.stages)
+        is_last_stage = stage_number >= total_stages
+
         next_stage = (
             self.session.query(GameStage)
             .options(selectinload(GameStage.puzzle))
@@ -413,13 +405,16 @@ class GameService:
         next_puzzle_schema = None
         next_stage_number = next_stage.stage_number if next_stage else None
 
-        if (
+        if is_last_stage:
+            # 마지막 stage를 완료한 경우
+            stage.game.status = "finished"
+        elif (
             next_stage
             and next_stage.puzzle
             and next_stage.status == "playing"
-            and next_stage.puzzle.modified_image_url
-            != next_stage.puzzle.original_image_url
+            and next_stage.puzzle.is_completed
         ):
+            # 다음 puzzle이 완료된 경우
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
                 original_image_url=self._build_view_url(
@@ -434,14 +429,18 @@ class GameService:
             )
             stage.game.status = "playing"
         elif next_stage:
+            # 다음 stage가 있지만 puzzle이 아직 완료되지 않은 경우
             stage.game.status = "waiting_next_stage"
+        else:
+            # 다음 stage가 없는 경우 (데이터 불일치)
+            stage.game.status = "finished"
 
         self.session.commit()
 
         return StageResultResponse(
             game_id=game_id,
             stage_number=stage_number,
-            total_stages=len(stage.game.stages),
+            total_stages=total_stages,
             status=stage.game.status,
             current_score=stage.game.current_score,
             found_difference_count=stage.found_difference_count,
@@ -497,8 +496,10 @@ class GameService:
             found_infos.append(
                 FoundDifference(
                     difference_id=hit.difference.id,
-                    x=hit.difference.x + hit.difference.width / 2,
-                    y=hit.difference.y + hit.difference.height / 2,
+                    x=hit.difference.x,
+                    y=hit.difference.y,
+                    width=hit.difference.width,
+                    height=hit.difference.height,
                     label=hit.difference.label,
                     hit_at=hit.hit_at,
                 )

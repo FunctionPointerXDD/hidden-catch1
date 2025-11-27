@@ -6,9 +6,7 @@ import time
 
 import boto3
 from celery import chain
-from google import genai
 from google.cloud import vision
-from google.genai import types
 from PIL import Image, ImageDraw
 from sqlalchemy import delete, select
 
@@ -18,11 +16,7 @@ from app.models.game import Game, GameStage
 from app.models.puzzle import Difference, Puzzle
 from app.models.upload_slot import GameUploadSlot
 from app.worker.celery_app import celery_app
-from app.worker.detect import (
-    find_game_objects_normalized,
-    modify_image_with_imagen,
-    modify_image_with_imagen2,
-)
+from app.worker.detect import modify_image_with_imagen
 
 
 def _calculate_overlap_ratio(
@@ -134,49 +128,6 @@ def _build_rect_tree(
     # 루트 노드들만 반환 (부모가 없는 노드들)
     root_nodes = [node for node in nodes if node["parent"] is None]
     return root_nodes
-
-
-def _calculate_iou(box1: dict[str, float], box2: dict[str, float]) -> float:
-    """
-    두 bounding box 간의 IoU (Intersection over Union)를 계산합니다.
-
-    Args:
-        box1: 첫 번째 박스 {'x': float, 'y': float, 'width': float, 'height': float}
-        box2: 두 번째 박스 {'x': float, 'y': float, 'width': float, 'height': float}
-
-    Returns:
-        IoU 값 (0.0 ~ 1.0). 1.0이면 완전히 겹침, 0.0이면 겹치지 않음.
-    """
-    x1_1, y1_1 = box1["x"], box1["y"]
-    x2_1 = x1_1 + box1["width"]
-    y2_1 = y1_1 + box1["height"]
-
-    x1_2, y1_2 = box2["x"], box2["y"]
-    x2_2 = x1_2 + box2["width"]
-    y2_2 = y1_2 + box2["height"]
-
-    # 교집합 영역 계산
-    inter_x1 = max(x1_1, x1_2)
-    inter_y1 = max(y1_1, y1_2)
-    inter_x2 = min(x2_1, x2_2)
-    inter_y2 = min(y2_1, y2_2)
-
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-
-    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-
-    # 각 박스의 면적
-    area1 = box1["width"] * box1["height"]
-    area2 = box2["width"] * box2["height"]
-
-    # 합집합 영역
-    union_area = area1 + area2 - inter_area
-
-    if union_area == 0:
-        return 0.0
-
-    return inter_area / union_area
 
 
 def _shrink_box_centered(
@@ -367,8 +318,24 @@ def detect_objects_for_slot(slot_id: int):
             original_rects.append({"x": x, "y": y, "width": width, "height": height})
             original_labels.append(label)
 
+        # 전체 이미지 면적 계산
+        total_image_area = image_width * image_height
+        size_threshold = 0.4  # 40% 이상인 rect 제외
+
+        # 너무 큰 rect 제외 (전체 이미지 면적의 40% 이상)
+        size_filtered_rects: list[dict[str, float]] = []
+        size_filtered_labels: list[str] = []
+        for rect, label in zip(original_rects, original_labels):
+            rect_area = rect["width"] * rect["height"]
+            area_ratio = rect_area / total_image_area
+            if area_ratio < size_threshold:
+                size_filtered_rects.append(rect)
+                size_filtered_labels.append(label)
+
         # 트리 구조 생성 (90% 이상 겹치면 포함 관계)
-        tree = _build_rect_tree(original_rects, original_labels, overlap_threshold=0.9)
+        tree = _build_rect_tree(
+            size_filtered_rects, size_filtered_labels, overlap_threshold=0.9
+        )
 
         # 트리 구조에서 부모-자식 관계가 있는 경우 더 큰 rect(부모) 제외
         excluded_indices: set[int] = set()
@@ -389,7 +356,9 @@ def detect_objects_for_slot(slot_id: int):
         # 제외되지 않은 rect만 필터링
         filtered_rects: list[dict[str, float]] = []
         filtered_labels: list[str] = []
-        for i, (rect, label) in enumerate(zip(original_rects, original_labels)):
+        for i, (rect, label) in enumerate(
+            zip(size_filtered_rects, size_filtered_labels)
+        ):
             if i not in excluded_indices:
                 filtered_rects.append(rect)
                 filtered_labels.append(label)
@@ -480,131 +449,7 @@ def detect_objects_for_slot(slot_id: int):
 
 
 @celery_app.task
-def edit_image_with_nano_banana(payload: dict):
-    slot_id = payload["slot_id"]
-    detected = payload["detected"]
-    with get_session() as session:
-        slot = session.get(GameUploadSlot, slot_id)
-        if slot is None or not slot.s3_object_key:
-            return
-
-        s3_object_key = slot.s3_object_key
-
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
-        )
-        try:
-            s3_response = s3_client.get_object(
-                Bucket=settings.aws_s3_bucket_name, Key=s3_object_key
-            )
-            image_bytes = s3_response["Body"].read()
-        except Exception as e:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"S3 download failed: {e}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        # GCP 서비스 계정 키 설정
-        if settings.google_application_credentials:
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
-        
-        prompt = _build_prompt(detected)
-        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-        client = genai.Client(
-            vertexai=True,
-            project=settings.gcp_project_id,
-            location="us-central1",
-        )
-
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-image",
-                contents=[prompt, image_part],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                ),
-            )
-        except Exception as e:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Gemini call failed: {e}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        candidates = getattr(response, "candidates", None)
-        if not candidates:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Gemini returned nothing."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        content = getattr(candidates[0], "content", None)
-        if not content or not getattr(content, "parts", None):
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Gemini returned nothing."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        game = session.get(Game, slot.game_id)
-        if game is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Game not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
-        if stage is None:
-            stage = GameStage(
-                game_id=game.id,
-                stage_number=slot.slot_number,
-                status="waiting_puzzle",
-                started_at=datetime.now(),
-            )
-            session.add(stage)
-            session.flush()
-            slot.stage_id = stage.id
-        if not stage or not stage.puzzle:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Puzzle not found"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        processed = False
-
-        for part in content.parts:
-            inline = getattr(part, "inline_data", None)
-            if not inline:
-                continue
-
-            image_bytes = inline.data
-            if image_bytes is None:
-                slot.analysis_status = "failed"
-                slot.analysis_error = "Gemini returned nothing."
-                slot.last_analyzed_at = datetime.now()
-                return
-
-            output_key = s3_object_key.replace(".png", "-modified.png")
-
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket_name,
-                Key=output_key,
-                Body=image_bytes,
-                ContentType="image/png",
-            )
-
-            stage.puzzle.modified_image_url = output_key
-            stage.status = "playing"
-            game.status = "playing"
-
-            slot.analysis_status = "completed"
-            slot.analysis_error = None
-            slot.last_analyzed_at = datetime.now()
-
-
-@celery_app.task
-def edit_image_with_imagen(payload: dict):
+def edit_image_with_imagen3(payload: dict):
     slot_id = payload["slot_id"]
     detected = payload["detected"]
     with get_session() as session:
@@ -724,6 +569,7 @@ def edit_image_with_imagen(payload: dict):
             return
 
         stage.puzzle.modified_image_url = output_key
+        stage.puzzle.is_completed = True
         stage.status = "playing"
         game.status = "playing"
 
@@ -736,281 +582,5 @@ def edit_image_with_imagen(payload: dict):
 def run_imagen_pipeline(slot_id: int) -> None:
     chain(
         detect_objects_for_slot.s(slot_id),
-        edit_image_with_imagen.s(),
+        edit_image_with_imagen3.s(),
     ).delay()
-
-
-def _build_prompt(detected_objects: list) -> str:
-    import random
-
-    # 1. 틀린그림찾기용 액션 리스트 (랜덤 선택용)
-    actions = [
-        "Change the color of the object to a different hue.",  # 색상 변경
-        "Replace the object with a similar but distinct item.",  # 비슷한 물건으로 교체
-        "Remove the object completely and fill with background (inpainting).",  # 삭제
-        "Change the texture or pattern of the object.",  # 패턴 변경
-        "Flip or rotate the object slightly.",  # 회전/반전
-    ]
-
-    # 2. 프롬프트 헤더 작성
-    prompt_lines = [
-        "Create a 'Spot the Difference' puzzle image based on the input image.",
-        "Apply visual modifications ONLY to the specific regions defined by the bounding boxes below.",
-        "The coordinates are provided in [ymin, xmin, ymax, xmax] format on a 0-1000 scale.",
-        "",  # 가독성을 위한 빈 줄
-    ]
-
-    # 3. 각 영역별 지시사항 생성
-    for idx, item in enumerate(detected_objects, 1):
-        rect = item["rect"]
-        action = random.choice(actions)
-
-        prompt_lines.append(f"{idx}. Region {rect}: {action}")
-
-    # 4. 프롬프트 푸터
-    prompt_lines.extend(
-        [
-            "",
-            "Constraints:",
-            "- Ensure all edits blend seamlessly with the original image's lighting, shadows, and style.",
-            "- Do NOT modify any part of the image outside the specified bounding boxes.",
-            "- Keep the image realistic and high quality.",
-        ]
-    )
-
-    # 5. 하나의 문자열로 합쳐서 반환
-    return "\n".join(prompt_lines)
-
-
-@celery_app.task
-def process_uploaded_image(slot_id: int):
-    with get_session() as session:
-        slot = session.get(GameUploadSlot, slot_id)
-        if slot is None:
-            return
-        if slot.s3_object_key is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Upload slot has no image."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        slot.analysis_status = "processing"
-        slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
-
-        game = session.get(Game, slot.game_id)
-        if game is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Game not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        existing_stage = (
-            session.get(GameStage, slot.stage_id) if slot.stage_id else None
-        )
-        puzzle = (
-            existing_stage.puzzle if existing_stage and existing_stage.puzzle else None
-        )
-
-        if puzzle is None:
-            puzzle = Puzzle(
-                difficulty=game.difficulty,
-                original_image_url=slot.s3_object_key,
-                modified_image_url=slot.s3_object_key,
-                width=0,
-                height=0,
-            )
-            session.add(puzzle)
-            session.flush()
-
-            if existing_stage is not None:
-                existing_stage.puzzle_id = puzzle.id
-            else:
-                stage = GameStage(
-                    game_id=game.id,
-                    puzzle_id=puzzle.id,
-                    stage_number=slot.slot_number,
-                    status="waiting_puzzle",
-                    started_at=datetime.now(),
-                )
-                session.add(stage)
-                session.flush()
-                slot.stage_id = stage.id
-                game.status = "waiting_next_stage"
-                existing_stage = stage
-
-        # 이미지 가져오기
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
-        )
-
-        try:
-            s3_response = s3_client.get_object(
-                Bucket=settings.aws_s3_bucket_name, Key=slot.s3_object_key
-            )
-            image_bytes = s3_response["Body"].read()
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"S3 download failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        try:
-            with Image.open(io.BytesIO(image_bytes)) as img:
-                img_width, img_height = img.size
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Invalid image: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        puzzle.width = img_width
-        puzzle.height = img_height
-
-        detected = []
-        index = 0
-
-        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
-        session.execute(stmt)
-        try:
-            detection_results = find_game_objects_normalized(image_bytes)
-        except Exception as exc:
-            detection_results = None
-            slot.analysis_error = f"Gemini detection failed: {exc}"
-        if not detection_results:
-            slot.analysis_status = "failed"
-            if slot.analysis_error is None:
-                slot.analysis_error = "Gemini detection returned no objects."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        # Gemini로부터 rect 받자마자 바로 이미지 보여주기
-        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        debug_draw = ImageDraw.Draw(debug_image)
-        for item in detection_results:
-            pixel_box = item.get("pixel_box", {})
-            x1 = pixel_box.get("xmin", 0)
-            y1 = pixel_box.get("ymin", 0)
-            x2 = pixel_box.get("xmax", 0)
-            y2 = pixel_box.get("ymax", 0)
-            debug_draw.rectangle(
-                [(x1, y1), (x2, y2)],
-                outline="red",
-                width=3,
-            )
-            label = item.get("name", "")
-            if label:
-                debug_draw.text(
-                    (x1, max(0, y1 - 12)),
-                    label,
-                    fill="red",
-                )
-        debug_image.show(title=f"slot-{slot_id}-gemini-detection")
-
-        slot.detected_objects = []
-
-        for item in detection_results:
-            index += 1
-            pixel_box = item["pixel_box"]
-
-            x = pixel_box["xmin"]
-            y = pixel_box["ymin"]
-            width = pixel_box["xmax"] - pixel_box["xmin"]
-            height = pixel_box["ymax"] - pixel_box["ymin"]
-
-            difference = Difference(
-                puzzle_id=puzzle.id,
-                index=index,
-                x=x,
-                y=y,
-                width=width,
-                height=height,
-                label=item.get("name"),
-            )
-            session.add(difference)
-            detected.append(difference)
-
-            normalized_rect = [
-                int(coord * 1000) for coord in item.get("normalized", [])
-            ]
-            slot.detected_objects.append(
-                {
-                    "label": item.get("name"),
-                    "rect": normalized_rect,
-                    "prompt": item.get("prompt"),
-                }
-            )
-
-        if existing_stage:
-            existing_stage.total_difference_count = len(detected)
-
-        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        debug_draw = ImageDraw.Draw(debug_image)
-        for diff in detected:
-            x1, y1 = diff.x, diff.y
-            x2 = x1 + diff.width
-            y2 = y1 + diff.height
-            debug_draw.rectangle(
-                [
-                    (x1, y1),
-                    (x2, y2),
-                ],
-                outline="red",
-                width=3,
-            )
-            if diff.label:
-                debug_draw.text(
-                    (x1, max(0, y1 - 12)),
-                    diff.label,
-                    fill="red",
-                )
-        debug_image.show(title=f"slot-{slot_id}-detection")
-
-        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        try:
-            temp_file.write(image_bytes)
-            temp_file.flush()
-            temp_file_path = temp_file.name
-        finally:
-            temp_file.close()
-
-        try:
-            imagen_output = modify_image_with_imagen2(temp_file_path, detection_results)
-        except Exception as exc:
-            os.unlink(temp_file_path)
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Imagen edit failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-        finally:
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-
-        if isinstance(imagen_output, (bytes, bytearray)):
-            output_key = slot.s3_object_key.replace(".png", "-modified.png")
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket_name,
-                Key=output_key,
-                Body=imagen_output,
-                ContentType="image/png",
-            )
-        elif isinstance(imagen_output, str):
-            output_key = imagen_output
-        else:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Imagen returned no data."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        puzzle.modified_image_url = output_key
-        slot.analysis_status = "completed"
-        slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
-
-        if existing_stage:
-            existing_stage.status = "playing"
-            existing_stage.started_at = existing_stage.started_at or datetime.now()
-        game.status = "playing"
