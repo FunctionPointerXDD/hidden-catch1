@@ -203,9 +203,6 @@ def modify_image_with_imagen(original_image_path, detection_results):
         )
     except Exception as e:
         print(f"Imagen API Error Detail: {e}")
-        # 여기서 에러가 나면 마스크 이미지를 로컬에 저장해서 눈으로 확인해봐야 함
-        mask_image.save("failed_mask_debug.png")
-        print("Saved 'failed_mask_debug.png' for inspection.")
         return None
 
     if response.generated_images:
