@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './ImageUploadPage.css';
 
 function ImageUploadPage({ onNavigate }) {
@@ -7,6 +7,18 @@ function ImageUploadPage({ onNavigate }) {
   const [isWaitingGame, setIsWaitingGame] = useState(false); // 게임 준비 대기 상태
   const MAX_IMAGES = 3;
   
+  // 컴포넌트 마운트 상태 및 타임아웃 관리
+  const isMounted = useRef(true);
+  const timeoutRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      isMounted.current = false;
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
 
   // 이미지 파일 검증
   const validateImageFile = (file) => {
@@ -71,9 +83,9 @@ function ImageUploadPage({ onNavigate }) {
           requested_slot_count: uploadedImages.length
         }),
       });
-
       if (!gameResponse.ok) {
         alert('게임 생성 요청에 실패했습니다.');
+        setIsWaitingGame(false);
         return;
       }
 
@@ -127,25 +139,54 @@ function ImageUploadPage({ onNavigate }) {
       }
 
       // 4. 상태 폴링 (1초마다 확인)
-      let pollTimeoutId = null;
+      let pollCount = 0;
+      const MAX_POLL_COUNT = 60; // 최대 60번 시도 (약 1분)
+
       const pollStatus = async () => {
-        const statusResponse = await fetch(`/api/v1/games/${game_id}`);
-        
-        if (!statusResponse.ok) {
-          console.error('상태 조회 실패');
+        // 컴포넌트가 언마운트되었으면 폴링 중단
+        if (!isMounted.current) return;
+
+        if (pollCount >= MAX_POLL_COUNT) {
+          alert('게임 생성 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.');
+          if (isMounted.current) setIsWaitingGame(false);
           return;
         }
 
-        const statusData = await statusResponse.json();
-        console.log('게임 상태:', statusData);
+        pollCount++;
 
-        if (statusData.status === 'playing') {
-          // 게임 시작 가능 상태
-          setIsWaitingGame(false);
-          onNavigate('game');
-        } else {
-          // 아직 준비 중이면 1초 후 재시도
-          pollTimeoutId = setTimeout(pollStatus, 1000);
+        try {
+          const statusResponse = await fetch(`/api/v1/games/${game_id}`);
+          
+          // 컴포넌트가 언마운트되었으면 중단
+          if (!isMounted.current) return;
+
+          if (!statusResponse.ok) {
+            console.error('상태 조회 실패');
+            // 실패해도 재시도할지, 중단할지 결정 필요. 여기서는 일단 중단.
+            return;
+          }
+
+          const statusData = await statusResponse.json();
+          console.log('게임 상태:', statusData);
+
+          if (statusData.status === 'playing') {
+            // 게임 시작 가능 상태
+            if (isMounted.current) {
+              setIsWaitingGame(false);
+              onNavigate('game');
+            }
+          } else {
+            // 아직 준비 중이면 1초 후 재시도
+            if (isMounted.current) {
+              timeoutRef.current = setTimeout(pollStatus, 1000);
+            }
+          }
+        } catch (error) {
+          console.error('폴링 중 에러:', error);
+          // 에러 발생 시에도 언마운트 상태 확인
+          if (isMounted.current) {
+             setIsWaitingGame(false);
+          }
         }
       };
 
@@ -154,8 +195,10 @@ function ImageUploadPage({ onNavigate }) {
 
     } catch (error) {
       console.error('게임 시작 에러:', error);
-      alert('게임 시작 중 오류가 발생했습니다.');
-      setIsWaitingGame(false); // 에러 시 대기 상태 해제
+      if (isMounted.current) {
+        alert('게임 시작 중 오류가 발생했습니다.');
+        setIsWaitingGame(false); // 에러 시 대기 상태 해제
+      }
     }
   };
 
