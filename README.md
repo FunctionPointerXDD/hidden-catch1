@@ -14,6 +14,8 @@ Hidden Catch는 사용자가 업로드한 이미지를 **Google Gemini AI**가 �
 ## 📺 프로젝트 시연 영상 (클릭하여 재생)
 [![Video Label](docs/somenail.png)](https://youtu.be/YM23d_cMYHg)
 
+🎮 라이브 데모 접속: http://3.35.22.142/
+
 ### 주요 특징
 
 - 🎨 **AI 자동 퍼즐 생성**: Gemini Vision API로 객체 탐지, Imagen API로 이미지 자동 편집
