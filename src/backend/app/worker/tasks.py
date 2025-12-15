@@ -159,11 +159,13 @@ def _shrink_box_centered(
     }
 
 
-def _process_rects_with_iou(
+def _process_rects_with_overlap(
     rects: list[dict[str, float]], labels: list[str]
 ) -> tuple[list[dict[str, float] | None], list[str]]:
     """
-    모든 rect에 대해 IoU를 계산하고 처리합니다.
+    모든 rect에 대해 겹침 비율을 계산하고 처리합니다.
+    각 rect가 다른 rect들과 얼마나 겹치는지 계산하여,
+    겹침 정도에 따라 삭제 또는 축소합니다.
 
     Args:
         rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
@@ -400,8 +402,8 @@ def detect_objects_for_slot(slot_id: int):
                 filtered_rects.append(rect)
                 filtered_labels.append(label)
 
-        # IoU에 따라 처리 (50% 이상 삭제, 10-50% 축소, 10% 미만 유지)
-        processed_rects, processed_labels = _process_rects_with_iou(
+        # 겹침 비율에 따라 처리 (50% 이상 삭제, 10-50% 축소, 10% 미만 유지)
+        processed_rects, processed_labels = _process_rects_with_overlap(
             filtered_rects, filtered_labels
         )
 

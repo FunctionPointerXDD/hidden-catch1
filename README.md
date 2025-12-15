@@ -11,6 +11,9 @@
 
 Hidden Catch는 사용자가 업로드한 이미지를 **Google Gemini AI**가 자동으로 분석하고 수정하여 틀린그림찾기 퍼즐을 생성하는 웹 기반 게임입니다.
 
+## 📺 프로젝트 시연 영상 (클릭하여 재생)
+[![Video Label](docs/somenail.png)](https://youtu.be/YM23d_cMYHg)
+
 ### 주요 특징
 
 - 🎨 **AI 자동 퍼즐 생성**: Gemini Vision API로 객체 탐지, Imagen API로 이미지 자동 편집
@@ -113,10 +116,6 @@ cp .env.example .env
 docker compose up -d
 ```
 
-4. **서비스 접속**
-- Frontend: http://localhost (Nginx)
-- Backend API: http://localhost/api/v1/docs (Swagger)
-
 ### 프론트엔드 개발 서버 (선택사항)
 
 ```bash
@@ -194,8 +193,6 @@ Celery Worker → Vision API / Imagen API
 
 ## 📝 API 문서
 
-Swagger UI: http://localhost/api/v1/docs
-
 주요 엔드포인트:
 - `POST /api/v1/games` - 게임 생성
 - `POST /api/v1/games/{game_id}/uploads/complete` - 업로드 완료
@@ -218,7 +215,6 @@ This project is licensed under the MIT License.
 ## 🔗 관련 링크
 
 - [시퀀스 다이어그램](docs/sequence-diagrams.md)
-- [API 문서](http://localhost/api/v1/docs)
 - [GitHub Repository](https://github.com/hidden-catch/hidden-catch1)
 
 ## 📮 문의
