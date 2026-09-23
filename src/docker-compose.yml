@@ -1,3 +1,21 @@
+# Shared environment for the API and the worker (both read the same settings).
+x-backend-env: &backend-env
+  DATABASE_URL: ${DATABASE_URL}
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_REGION: ${AWS_REGION:-ap-northeast-2}
+  GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
+  GCP_LOCATION: ${GCP_LOCATION:-global}
+  GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+  GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+  # Puzzle pipeline knobs (see docs/puzzle-pipeline-v2.md)
+  IMAGE_EDIT_MODEL: ${IMAGE_EDIT_MODEL:-gemini-3.1-flash-lite-image}
+  PUZZLE_MAX_EDGE: ${PUZZLE_MAX_EDGE:-1024}
+  PUZZLE_CACHE_ENABLED: ${PUZZLE_CACHE_ENABLED:-true}
+
 services:
   # FastAPI 백엔드
   backend:
@@ -6,16 +24,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: hidden-catch-backend
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
-      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+    environment: *backend-env
     ports:
       - "8000:8000"
     networks:
@@ -23,7 +32,11 @@ services:
     volumes:
       - ./backend:/app
       - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:ro
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      redis:
+        condition: service_healthy
+    # 개발 중 자동 재시작이 필요하면 `--reload`를 붙여서 실행하세요.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 5s
@@ -31,7 +44,7 @@ services:
       retries: 10
       start_period: 10s
 
-  # Redis
+  # Redis (Celery 브로커)
   redis:
     init: true
     image: redis:7-alpine
@@ -40,32 +53,20 @@ services:
       - "6379:6379"
     networks:
       - app-network
-    depends_on:
-      backend:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Celery Worker
+  # Celery Worker (퍼즐 생성 파이프라인)
   celery:
     init: true
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: hidden-catch-celery
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
-      AWS_S3_BUCKET_NAME: ${AWS_S3_BUCKET_NAME}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_REGION: ${AWS_REGION:-ap-northeast-2}
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+    environment: *backend-env
     networks:
       - app-network
     depends_on:
@@ -74,7 +75,9 @@ services:
     volumes:
       - ./backend:/app
       - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:ro
-    command: celery -A app.celery_app worker --loglevel=info
+    # 태스크는 대부분 네트워크 대기(S3/Vision/Gemini)이므로 vCPU 수보다 많은
+    # 동시성이 유리하다. 메모리 여유에 맞춰 CELERY_CONCURRENCY로 조절.
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-3}
 
   # Nginx (React 정적 파일 + 리버스 프록시)
   nginx:

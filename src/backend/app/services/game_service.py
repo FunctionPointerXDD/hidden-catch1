@@ -3,7 +3,6 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
-from celery import chain
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
@@ -30,7 +29,7 @@ from app.schemas.puzzle import (
     HitAttempt,
     PuzzleForGameResponse,
 )
-from app.worker.tasks import run_imagen_pipeline
+from app.worker.tasks import generate_puzzle_for_slot, refresh_game_status
 
 
 def _build_s3_client() -> Any:
@@ -176,9 +175,12 @@ class GameService:
         slot.analysis_error = None
         slot.detected_objects = None
         slot.last_analyzed_at = None
+        stage = self.session.get(GameStage, slot.stage_id) if slot.stage_id else None
+        if stage is not None and stage.status == "waiting_upload":
+            stage.status = "waiting_puzzle"
         self._validate_upload_content_type(slot.s3_object_key)
         self.session.commit()
-        run_imagen_pipeline.delay(slot.id)
+        generate_puzzle_for_slot.delay(slot.id)
 
         slots = (
             self.session.query(GameUploadSlot)
@@ -186,13 +188,9 @@ class GameService:
             .order_by(GameUploadSlot.slot_number)
             .all()
         )
-        all_uploaded = all(s.uploaded for s in slots)
         game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
         if game is None:
             raise HTTPException(status_code=404, detail="Game not found")
-        # if all_uploaded and game.status == "waiting_upload":
-        #     game.status = "playing"
-
         status = [
             UploadSlotStatus(
                 slot=s.slot_number,
@@ -212,6 +210,37 @@ class GameService:
             status=game.status,
             slot_statuses=status,
         )
+
+    def mark_upload_failed(
+        self, game_id: int, data: UploadCompleteRequest
+    ) -> UploadSlotsStatusResponse:
+        """The browser could not upload this image: skip its stage so the game
+        can start with the images that did arrive."""
+        slot = (
+            self.session.query(GameUploadSlot)
+            .filter(
+                GameUploadSlot.game_id == game_id,
+                GameUploadSlot.slot_number == data.slot,
+            )
+            .one_or_none()
+        )
+        if slot is None:
+            raise HTTPException(status_code=404, detail="Upload slot not found")
+        if slot.uploaded:
+            raise HTTPException(status_code=409, detail="Slot was already uploaded")
+        slot.analysis_status = "failed"
+        slot.analysis_error = "Upload failed in the browser."
+        slot.last_analyzed_at = datetime.now()
+        stage = self.session.get(GameStage, slot.stage_id) if slot.stage_id else None
+        if stage is not None and stage.status == "waiting_upload":
+            stage.status = "failed"
+            stage.completed_at = datetime.now()
+        game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
+        if game is None:
+            raise HTTPException(status_code=404, detail="Game not found")
+        refresh_game_status(game)
+        self.session.commit()
+        return self.get_upload_status(game_id)
 
     def get_upload_status(self, game_id: int) -> UploadSlotsStatusResponse:
         slots = (
@@ -257,13 +286,14 @@ class GameService:
         if game is None:
             raise HTTPException(status_code=404, detail="Game not found")
 
+        stages = sorted(game.stages, key=lambda s: s.stage_number)
+        playable = [s for s in stages if s.status != "failed"]
+        # Stages are always played in order: the current one is the lowest
+        # numbered stage that is neither finished nor failed, even if a later
+        # stage's puzzle happened to be generated first.
         current_stage = next(
-            (
-                stage
-                for stage in game.stages
-                if stage.status in ("waiting_puzzle", "playing")
-            ),
-            game.stages[-1] if game.stages else None,
+            (stage for stage in playable if stage.status != "finished"),
+            playable[-1] if playable else None,
         )
         current_stage_number = current_stage.stage_number if current_stage else 0
         puzzle = (
@@ -297,7 +327,9 @@ class GameService:
             puzzle=puzzle_schema,
             current_score=game.current_score,
             current_stage=current_stage_number,
-            total_stages=len(game.stages),
+            total_stages=len(playable),
+            ready_stages=sum(1 for s in stages if s.status in ("playing", "finished")),
+            failed_stages=len(stages) - len(playable),
         )
 
     def check_answer(
@@ -322,7 +354,6 @@ class GameService:
             raise HTTPException(status_code=400, detail="Puzzle not ready")
 
         attempt = HitAttempt(x=payload.x, y=payload.y)
-        print(attempt)
         matched = self._match_difference(stage.puzzle.differences, payload.x, payload.y)
         total_diffs = stage.total_difference_count or len(stage.puzzle.differences)
 
@@ -383,38 +414,31 @@ class GameService:
         if stage is None:
             raise HTTPException(status_code=404, detail="Stage not found")
 
-        stage.status = "finished"
-        stage.completed_at = datetime.now()
+        if stage.status != "finished":
+            stage.status = "finished"
+            stage.completed_at = datetime.now()
         if stage.total_difference_count is None and stage.puzzle is not None:
             stage.total_difference_count = len(stage.puzzle.differences)
 
-        total_stages = len(stage.game.stages)
-        is_last_stage = stage_number >= total_stages
-
-        next_stage = (
-            self.session.query(GameStage)
-            .options(selectinload(GameStage.puzzle))
-            .filter(
-                GameStage.game_id == game_id,
-                GameStage.stage_number == stage_number + 1,
-            )
-            .one_or_none()
-        )
-        if next_stage and next_stage.status == "finished":
-            raise HTTPException(status_code=404, detail="Stage not found")
-        next_puzzle_schema = None
+        # Stages whose puzzle could not be generated are skipped, not awaited.
+        stages = sorted(stage.game.stages, key=lambda s: s.stage_number)
+        playable = [s for s in stages if s.status != "failed"]
+        total_stages = len(playable)
+        remaining = [
+            s for s in playable
+            if s.stage_number > stage_number and s.status != "finished"
+        ]
+        next_stage = remaining[0] if remaining else None
         next_stage_number = next_stage.stage_number if next_stage else None
+        next_puzzle_schema = None
 
-        if is_last_stage:
-            # 마지막 stage를 완료한 경우
+        if next_stage is None:
             stage.game.status = "finished"
         elif (
-            next_stage
-            and next_stage.puzzle
-            and next_stage.status == "playing"
+            next_stage.status == "playing"
+            and next_stage.puzzle is not None
             and next_stage.puzzle.is_completed
         ):
-            # 다음 puzzle이 완료된 경우
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
                 original_image_url=self._build_view_url(
@@ -428,12 +452,9 @@ class GameService:
                 total_difference_count=len(next_stage.puzzle.differences),
             )
             stage.game.status = "playing"
-        elif next_stage:
-            # 다음 stage가 있지만 puzzle이 아직 완료되지 않은 경우
-            stage.game.status = "waiting_next_stage"
         else:
-            # 다음 stage가 없는 경우 (데이터 불일치)
-            stage.game.status = "finished"
+            # Next stage exists but its puzzle is still being generated.
+            stage.game.status = "waiting_next_stage"
 
         self.session.commit()
 

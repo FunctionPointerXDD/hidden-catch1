@@ -1,618 +1,538 @@
+"""Puzzle generation pipeline (one Celery task per uploaded image).
+
+v1 ran two chained tasks and shipped the full-resolution PNG through Redis
+between them (base64, once into the result backend and once into the next
+task's message). v2 does everything for a slot in one process:
+
+    download -> normalize (EXIF, RGB, <=1024px, aspect fit)
+             -> cache lookup (sha256 of pixels)
+             -> detect objects (Vision, on the small JPEG)
+             -> select regions -> build mask + hint image
+             -> edit (Gemini image model, with fallbacks)
+             -> composite with our mask -> verify each region changed
+             -> upload original/modified JPEGs (+ cache manifest)
+             -> persist puzzle, differences, stage/game status
+
+Only the slot id travels through the broker.
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-import io
-import os
-import tempfile
+import hashlib
+import json
+import logging
 import time
+from typing import Any
 
 import boto3
-from celery import chain
-from google.cloud import vision
-from PIL import Image, ImageDraw, ImageOps
-from sqlalchemy import delete, select
+from botocore.exceptions import ClientError
 
 from app.core.config import settings
 from app.db.utils import get_session
 from app.models.game import Game, GameStage
 from app.models.puzzle import Difference, Puzzle
 from app.models.upload_slot import GameUploadSlot
+from app.worker import detect, imaging
 from app.worker.celery_app import celery_app
-from app.worker.detect import modify_image_with_imagen
+from app.worker.geometry import select_difference_rects
 
-MAX_SIZE_BYTES = 27_000_000
+logger = logging.getLogger(__name__)
+
+CACHE_VERSION = "v1"
+ACTIVE_STAGE_STATUSES = ("waiting_upload", "waiting_puzzle", "playing")
+
+_s3_client: Any = None
 
 
-def _calculate_overlap_ratio(
-    child_box: dict[str, float], parent_box: dict[str, float]
-) -> float:
+def get_s3_client() -> Any:
+    """boto3 client shared by all tasks in this worker process (thread-safe)."""
+    global _s3_client
+    if _s3_client is None:
+        kwargs: dict[str, str] = {}
+        if settings.aws_access_key_id and settings.aws_secret_access_key:
+            kwargs["aws_access_key_id"] = settings.aws_access_key_id
+            kwargs["aws_secret_access_key"] = settings.aws_secret_access_key
+        _s3_client = boto3.client("s3", region_name=settings.aws_region, **kwargs)
+    return _s3_client
+
+
+class PuzzleGenerationError(RuntimeError):
+    """The image cannot be turned into a playable puzzle."""
+
+
+@dataclass
+class PuzzleResult:
+    original_key: str
+    modified_key: str
+    width: int
+    height: int
+    differences: list[dict[str, Any]]
+    detected: list[dict[str, Any]] = field(default_factory=list)
+    model: str | None = None
+    cache_hit: bool = False
+
+
+@contextlib.contextmanager
+def _timed(timings: dict[str, float] | None, name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        if timings is not None:
+            timings[name] = round(time.perf_counter() - start, 3)
+
+
+def content_hash(image) -> str:
+    """Stable id of the normalized pixels (same picture -> same puzzle)."""
+    digest = hashlib.sha256()
+    digest.update(f"{image.size[0]}x{image.size[1]}:{image.mode}:".encode())
+    digest.update(image.tobytes())
+    return digest.hexdigest()
+
+
+def _cache_prefix(digest: str) -> str:
+    prefix = settings.puzzle_cache_prefix.strip("/")
+    return f"{prefix}/{CACHE_VERSION}/{digest}"
+
+
+def _load_cached_puzzle(s3: Any, digest: str) -> PuzzleResult | None:
+    key = f"{_cache_prefix(digest)}/manifest.json"
+    try:
+        body = s3.get_object(Bucket=settings.aws_s3_bucket_name, Key=key)["Body"].read()
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None
+        logger.warning("puzzle cache lookup failed key=%s: %s", key, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001 - cache must never break generation
+        logger.warning("puzzle cache lookup failed key=%s: %s", key, exc)
+        return None
+    try:
+        manifest = json.loads(body)
+        if manifest.get("version") != CACHE_VERSION or not manifest.get("differences"):
+            return None
+        return PuzzleResult(
+            original_key=manifest["original_key"],
+            modified_key=manifest["modified_key"],
+            width=int(manifest["width"]),
+            height=int(manifest["height"]),
+            differences=list(manifest["differences"]),
+            detected=list(manifest.get("detected") or []),
+            model=manifest.get("model"),
+            cache_hit=True,
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        logger.warning("ignoring corrupt puzzle cache manifest key=%s: %s", key, exc)
+        return None
+
+
+def _put_objects(s3: Any, objects: list[tuple[str, bytes, str]]) -> None:
+    """Upload several small objects concurrently."""
+
+    def _put(item: tuple[str, bytes, str]) -> None:
+        key, body, content_type = item
+        s3.put_object(
+            Bucket=settings.aws_s3_bucket_name,
+            Key=key,
+            Body=body,
+            ContentType=content_type,
+            CacheControl="public, max-age=31536000, immutable",
+        )
+
+    if len(objects) == 1:
+        _put(objects[0])
+        return
+    with ThreadPoolExecutor(max_workers=min(4, len(objects))) as pool:
+        list(pool.map(_put, objects))
+
+
+def _edit_until_visible(
+    normalized: Any,
+    padded: list[dict[str, Any]],
+    *,
+    original_png: bytes,
+    hint_png: bytes | None,
+    aspect_label: str | None,
+    feather: int,
+    timings: dict[str, float] | None,
+) -> tuple[Any, list[dict[str, Any]], str | None]:
+    """Call the image model until at least one region visibly changed.
+
+    Returns ``(edited_image, kept_regions, model_name)``; ``kept_regions`` is
+    empty when every attempt came back unchanged.
     """
-    child_box가 parent_box에 얼마나 포함되어 있는지 비율을 계산합니다.
+    width, height = normalized.size
+    preview_mask = imaging.build_mask((width, height), padded, feather)
+    attempts = max(1, settings.image_edit_max_attempts)
+    edited = None
+    model_used: str | None = None
+    kept: list[dict[str, Any]] = []
+    for attempt in range(1, attempts + 1):
+        prompt = detect.build_edit_prompt(
+            padded,
+            width,
+            height,
+            bold=attempt > 1,
+            with_hint_image=hint_png is not None,
+        )
+        with _timed(timings, f"edit_{attempt}"):
+            edited_bytes, model_used = detect.edit_image(
+                original_png,
+                prompt,
+                hint_png=hint_png,
+                aspect_ratio=aspect_label,
+                image_size=settings.image_edit_image_size,
+            )
+        edited = imaging.decode_image(edited_bytes)
+        preview = imaging.composite_edit(normalized, edited, preview_mask)
+        kept = []
+        for region in padded:
+            change = imaging.measure_change(normalized, preview, region)
+            if change >= settings.puzzle_min_change_score:
+                kept.append({**region, "change": round(change, 2)})
+        if kept:
+            break
+        logger.warning(
+            "edit attempt %d/%d produced no visible change (model=%s)",
+            attempt,
+            attempts,
+            model_used,
+        )
+    return edited, kept, model_used
 
-    Args:
-        child_box: 자식 박스 {'x': float, 'y': float, 'width': float, 'height': float}
-        parent_box: 부모 박스 {'x': float, 'y': float, 'width': float, 'height': float}
 
-    Returns:
-        child_box 면적 대비 겹침 비율 (0.0 ~ 1.0)
-    """
-    x1, y1 = child_box["x"], child_box["y"]
-    x2 = x1 + child_box["width"]
-    y2 = y1 + child_box["height"]
-
-    px1, py1 = parent_box["x"], parent_box["y"]
-    px2 = px1 + parent_box["width"]
-    py2 = py1 + parent_box["height"]
-
-    # 교집합 영역 계산
-    inter_x1 = max(x1, px1)
-    inter_y1 = max(y1, py1)
-    inter_x2 = min(x2, px2)
-    inter_y2 = min(y2, py2)
-
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-        return 0.0
-
-    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    child_area = child_box["width"] * child_box["height"]
-
-    if child_area == 0:
-        return 0.0
-
-    return inter_area / child_area
+def _output_keys(digest: str, key_base: str) -> tuple[str, str, str | None]:
+    """S3 keys for (original, modified, manifest-or-None)."""
+    if settings.puzzle_cache_enabled:
+        prefix = _cache_prefix(digest)
+        return (
+            f"{prefix}/original.jpg",
+            f"{prefix}/modified.jpg",
+            f"{prefix}/manifest.json",
+        )
+    return f"{key_base}-original.jpg", f"{key_base}-modified.jpg", None
 
 
-def _build_rect_tree(
-    rects: list[dict[str, float]], labels: list[str], overlap_threshold: float = 0.9
-) -> list[dict]:
-    """
-    rect들 간의 포함 관계를 기반으로 트리 구조를 생성합니다.
-    90% 이상 겹치면 포함 관계로 간주합니다.
-
-    Args:
-        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
-        labels: 각 rect의 라벨 리스트
-        overlap_threshold: 포함 관계로 간주할 겹침 비율 (기본값: 0.9 = 90%)
-
-    Returns:
-        트리 구조 리스트 [{'rect': dict, 'label': str, 'children': list, 'index': int}, ...]
-        루트 노드들만 반환되며, 각 노드는 children 리스트를 가집니다.
-    """
-    # 면적 계산 및 인덱스와 함께 저장
-    rect_data: list[tuple[dict[str, float], str, float, int]] = []
-    for i, (rect, label) in enumerate(zip(rects, labels)):
-        area = rect["width"] * rect["height"]
-        rect_data.append((rect, label, area, i))
-
-    # 면적 내림차순으로 정렬 (큰 것부터)
-    rect_data.sort(key=lambda x: x[2], reverse=True)
-
-    # 트리 노드 생성
-    nodes: list[dict] = []
-    node_map: dict[int, dict] = {}  # index -> node
-
-    for rect, label, area, original_index in rect_data:
-        node = {
-            "rect": rect,
-            "label": label,
-            "index": original_index,
-            "children": [],
-            "parent": None,
+def _build_result(
+    kept: list[dict[str, Any]],
+    width: int,
+    height: int,
+    model_used: str | None,
+    original_key: str,
+    modified_key: str,
+) -> PuzzleResult:
+    differences = [
+        {
+            "index": index,
+            "x": r["x"],
+            "y": r["y"],
+            "width": r["width"],
+            "height": r["height"],
+            "label": r["label"],
         }
-        nodes.append(node)
-        node_map[original_index] = node
-
-    # 각 rect에 대해 부모 찾기
-    for i, (rect, label, area, original_index) in enumerate(rect_data):
-        current_node = node_map[original_index]
-
-        # 자신보다 큰 rect들 중에서 90% 이상 포함되는 가장 작은 rect 찾기
-        best_parent = None
-        best_parent_area = float("inf")
-
-        for j in range(i):  # 자신보다 큰 rect들만 확인
-            parent_rect, parent_label, parent_area, parent_index = rect_data[j]
-            parent_node = node_map[parent_index]
-
-            # 이미 부모가 있으면 건너뛰기
-            if parent_node["parent"] is not None:
-                continue
-
-            overlap_ratio = _calculate_overlap_ratio(rect, parent_rect)
-            if overlap_ratio >= overlap_threshold:
-                # 더 작은 부모를 선택 (더 가까운 부모)
-                if parent_area < best_parent_area:
-                    best_parent = parent_node
-                    best_parent_area = parent_area
-
-        if best_parent:
-            best_parent["children"].append(current_node)
-            current_node["parent"] = best_parent
-
-    # 루트 노드들만 반환 (부모가 없는 노드들)
-    root_nodes = [node for node in nodes if node["parent"] is None]
-    return root_nodes
+        for index, r in enumerate(kept, start=1)
+    ]
+    detected = [
+        {
+            "label": r["label"],
+            "rect": imaging.to_normalized_rect(r, width, height),
+            "score": round(r["score"], 3),
+            "change": r["change"],
+        }
+        for r in kept
+    ]
+    return PuzzleResult(
+        original_key=original_key,
+        modified_key=modified_key,
+        width=width,
+        height=height,
+        differences=differences,
+        detected=detected,
+        model=model_used,
+    )
 
 
-def _shrink_box_centered(
-    box: dict[str, float], shrink_ratio: float = 0.1
-) -> dict[str, float]:
-    """
-    박스를 중앙을 고정한 상태에서 크기를 축소합니다.
+def generate_puzzle_images(
+    image_bytes: bytes,
+    *,
+    s3: Any,
+    key_base: str,
+    timings: dict[str, float] | None = None,
+) -> PuzzleResult:
+    """Pure pipeline: bytes in, S3 keys + answer rects out. No database access."""
+    with _timed(timings, "normalize"):
+        normalized = imaging.normalize_image(
+            image_bytes, settings.puzzle_max_edge, settings.puzzle_fit_aspect_ratio
+        )
+    width, height = normalized.size
+    digest = content_hash(normalized)
 
-    Args:
-        box: 축소할 박스 {'x': float, 'y': float, 'width': float, 'height': float}
-        shrink_ratio: 축소 비율 (기본값: 0.1 = 10%)
+    if settings.puzzle_cache_enabled:
+        with _timed(timings, "cache_lookup"):
+            cached = _load_cached_puzzle(s3, digest)
+        if cached is not None:
+            return cached
 
-    Returns:
-        축소된 박스 (중앙 고정)
-    """
-    center_x = box["x"] + box["width"] / 2
-    center_y = box["y"] + box["height"] / 2
-
-    new_width = box["width"] * (1 - shrink_ratio)
-    new_height = box["height"] * (1 - shrink_ratio)
-
-    return {
-        "x": center_x - new_width / 2,
-        "y": center_y - new_height / 2,
-        "width": new_width,
-        "height": new_height,
-    }
-
-
-def _process_rects_with_overlap(
-    rects: list[dict[str, float]], labels: list[str]
-) -> tuple[list[dict[str, float] | None], list[str]]:
-    """
-    모든 rect에 대해 겹침 비율을 계산하고 처리합니다.
-    각 rect가 다른 rect들과 얼마나 겹치는지 계산하여,
-    겹침 정도에 따라 삭제 또는 축소합니다.
-
-    Args:
-        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
-        labels: 각 rect의 라벨 리스트
-
-    Returns:
-        처리된 rect 리스트 (삭제된 것은 None)와 라벨 리스트
-    """
-    processed_rects: list[dict[str, float] | None] = [rect.copy() for rect in rects]
-    processed_labels = labels.copy()
-
-    # 각 rect에 대해 다른 모든 rect와의 겹침 비율 계산 (해당 rect 면적 대비)
-    for i, current_rect in enumerate(processed_rects):
-        if current_rect is None:
-            continue
-
-        current_area = current_rect["width"] * current_rect["height"]
-        max_overlap_ratio = 0.0
-
-        for j, other_rect in enumerate(processed_rects):
-            if i == j or other_rect is None:
-                continue
-
-            # 교집합 영역 계산
-            x1_1, y1_1 = current_rect["x"], current_rect["y"]
-            x2_1 = x1_1 + current_rect["width"]
-            y2_1 = y1_1 + current_rect["height"]
-
-            x1_2, y1_2 = other_rect["x"], other_rect["y"]
-            x2_2 = x1_2 + other_rect["width"]
-            y2_2 = y1_2 + other_rect["height"]
-
-            inter_x1 = max(x1_1, x1_2)
-            inter_y1 = max(y1_1, y1_2)
-            inter_x2 = min(x2_1, x2_2)
-            inter_y2 = min(y2_1, y2_2)
-
-            if inter_x2 > inter_x1 and inter_y2 > inter_y1:
-                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-                # 현재 rect 면적 대비 겹침 비율
-                overlap_ratio = inter_area / current_area if current_area > 0 else 0.0
-                max_overlap_ratio = max(max_overlap_ratio, overlap_ratio)
-
-        # 겹침 비율에 따라 처리 (해당 rect 면적 대비)
-        if max_overlap_ratio >= 0.5:  # 겹침 >= 50% → 삭제
-            processed_rects[i] = None
-        elif max_overlap_ratio >= 0.1:  # 10% <= 겹침 < 50% → 중앙 고정하고 10% 축소
-            processed_rects[i] = _shrink_box_centered(current_rect, shrink_ratio=0.1)
-        # 겹침 < 10% → 그대로 유지
-
-    return processed_rects, processed_labels
-
-
-def _reduce_image_size(image_bytes: bytes, limit: int = MAX_SIZE_BYTES) -> bytes:
-    current_bytes = image_bytes
-
-    while len(current_bytes) > limit:
-        with Image.open(io.BytesIO(current_bytes)) as img:
-            img = img.convert("RGB")
-
-            new_width = max(1, int(img.width * 0.7))
-            new_height = max(1, int(img.height * 0.7))
-
-            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-            with io.BytesIO() as output:
-                img.save(output, format="PNG")
-                current_bytes = output.getvalue()
-
-    return current_bytes
-
-
-@celery_app.task(serializer='json')
-def long_running_task(param: int) -> str:
-    time.sleep(10)
-    return f"Proceed {param} successfully!"
-
-
-@celery_app.task(serializer='json')
-def detect_objects_for_slot(slot_id: int):
-    """
-    1. GameUploadSlot에서 슬롯 가져오기
-    2. s3에서 이미지 가져오기
-    3. Vision API로 오브젝트 탐지
-    4. 탐지한 오브젝트를 Difference로 저장 후 DB 저장
-    5. GameUploadSlot 슬롯 업데이트
-    """
-    with get_session() as session:
-        slot = session.get(GameUploadSlot, slot_id)
-        if slot is None:
-            return
-
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
+    with _timed(timings, "detect"):
+        boxes = detect.detect_objects(
+            imaging.encode_jpeg(normalized, 85), width, height
+        )
+    regions = select_difference_rects(
+        boxes,
+        width,
+        height,
+        max_count=settings.puzzle_max_differences,
+        min_area_ratio=settings.puzzle_min_area_ratio,
+    )
+    if not regions:
+        raise PuzzleGenerationError(
+            f"No suitable objects were detected ({len(boxes)} raw detections)."
         )
 
-        s3_response = s3_client.get_object(
-            Bucket=settings.aws_s3_bucket_name, Key=slot.s3_object_key
+    feather = imaging.feather_radius_for(width, height)
+    padded = [
+        {
+            **imaging.pad_rect(r, width, height, min_pad=feather + 2),
+            "label": r["label"],
+            "score": r["score"],
+        }
+        for r in regions
+    ]
+    hint_png = None
+    if settings.image_edit_send_region_hint:
+        hint = imaging.draw_region_hints(normalized, padded, offset=2 * feather + 2)
+        hint_png = imaging.encode_png(hint)
+    aspect_label = None
+    if settings.puzzle_fit_aspect_ratio:
+        aspect_label = imaging.nearest_aspect_ratio(width, height)[0]
+
+    edited, kept, model_used = _edit_until_visible(
+        normalized,
+        padded,
+        original_png=imaging.encode_png(normalized),
+        hint_png=hint_png,
+        aspect_label=aspect_label,
+        feather=feather,
+        timings=timings,
+    )
+    if not kept or edited is None:
+        raise PuzzleGenerationError("The edited image shows no visible differences.")
+
+    # Composite again with only the verified regions so nothing else differs.
+    with _timed(timings, "composite"):
+        final_mask = imaging.build_mask((width, height), kept, feather)
+        modified = imaging.composite_edit(normalized, edited, final_mask)
+        original_jpg = imaging.encode_jpeg(normalized, settings.puzzle_jpeg_quality)
+        modified_jpg = imaging.encode_jpeg(modified, settings.puzzle_jpeg_quality)
+
+    original_key, modified_key, manifest_key = _output_keys(digest, key_base)
+    result = _build_result(kept, width, height, model_used, original_key, modified_key)
+    uploads: list[tuple[str, bytes, str]] = [
+        (original_key, original_jpg, "image/jpeg"),
+        (modified_key, modified_jpg, "image/jpeg"),
+    ]
+    if manifest_key is not None:
+        manifest = {
+            "version": CACHE_VERSION,
+            "created_at": datetime.now().isoformat(),
+            **{k: v for k, v in asdict(result).items() if k != "cache_hit"},
+        }
+        uploads.append(
+            (manifest_key, json.dumps(manifest).encode(), "application/json")
         )
+    with _timed(timings, "upload"):
+        _put_objects(s3, uploads)
+    return result
 
-        image_bytes = s3_response["Body"].read()
 
-        if len(image_bytes) > MAX_SIZE_BYTES:
-            image_bytes = _reduce_image_size(image_bytes, limit=MAX_SIZE_BYTES)
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket_name,
-                Key=slot.s3_object_key,
-                Body=image_bytes,
-                ContentType="image/png",
-            )
-
-        # EXIF orientation으로 사진 방향 고정
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            img_with_exif = ImageOps.exif_transpose(img)
-            img_with_exif = img_with_exif.convert("RGB")
-            image_width, image_height = img_with_exif.size
-
-            normalized_output = io.BytesIO()
-            img_with_exif.save(normalized_output, format="PNG")
-            normalized_image_bytes = normalized_output.getvalue()
-
-        client = vision.ImageAnnotatorClient()
-        image = vision.Image(content=normalized_image_bytes)
-
-        objects = client.object_localization(image=image).localized_object_annotations  # type: ignore
-        if not objects:
-            slot.analysis_error = "No objects detected."
-            slot.analysis_status = "failed"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        game = session.get(Game, slot.game_id)
-        if game is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Game not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        existing_stage = (
-            session.get(GameStage, slot.stage_id) if slot.stage_id else None
+# --------------------------------------------------------------------------
+# Database side
+# --------------------------------------------------------------------------
+def _ensure_stage(session, game: Game, slot: GameUploadSlot) -> GameStage:
+    stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
+    if stage is None:
+        stage = next(
+            (s for s in game.stages if s.stage_number == slot.slot_number), None
         )
-        puzzle = (
-            existing_stage.puzzle if existing_stage and existing_stage.puzzle else None
+    if stage is None:
+        stage = GameStage(
+            game_id=game.id,
+            stage_number=slot.slot_number,
+            status="waiting_puzzle",
+            started_at=datetime.now(),
         )
+        session.add(stage)
+        session.flush()
+    slot.stage_id = stage.id
+    return stage
 
-        if puzzle is None:
-            puzzle = Puzzle(
-                difficulty=game.difficulty,
-                original_image_url=slot.s3_object_key,
-                modified_image_url=slot.s3_object_key,
-                width=image_width,
-                height=image_height,
-            )
-            session.add(puzzle)
-            session.flush()
 
-            if existing_stage is not None:
-                existing_stage.puzzle_id = puzzle.id
-            else:
-                existing_stage = GameStage(
-                    game_id=game.id,
-                    puzzle_id=puzzle.id,
-                    stage_number=slot.slot_number,
-                    status="waiting_puzzle",
-                    started_at=datetime.now(),
-                )
-                session.add(existing_stage)
-                session.flush()
-                slot.stage_id = existing_stage.id
-                game.status = "waiting_next_stage"
+def refresh_game_status(game: Game) -> None:
+    """Derive the game-level status from its stages.
 
-        # 먼저 모든 원본 rect 수집
-        original_rects: list[dict[str, float]] = []
-        original_labels: list[str] = []
-        for object_ in objects:
-            label = object_.name
-            vertices = object_.bounding_poly.normalized_vertices
+    - every stage failed            -> "failed"
+    - the first unfinished stage is
+      playable                      -> "playing"
+    - otherwise leave the status the API set (waiting_*, finished).
+    """
+    stages = sorted(game.stages, key=lambda s: s.stage_number)
+    if not stages or game.status == "finished":
+        return
+    if all(stage.status == "failed" for stage in stages):
+        game.status = "failed"
+        return
+    active = [s for s in stages if s.status in ACTIVE_STAGE_STATUSES]
+    if active and active[0].status == "playing":
+        game.status = "playing"
 
-            v_min, v_max = vertices[0], vertices[2]
 
-            x = v_min.x * image_width
-            y = v_min.y * image_height
-            width = (v_max.x - v_min.x) * image_width
-            height = (v_max.y - v_min.y) * image_height
-
-            original_rects.append({"x": x, "y": y, "width": width, "height": height})
-            original_labels.append(label)
-
-        # 전체 이미지 면적 계산
-        total_image_area = image_width * image_height
-        size_threshold = 0.4  # 40% 이상인 rect 제외
-
-        # 너무 큰 rect 제외 (전체 이미지 면적의 40% 이상)
-        size_filtered_rects: list[dict[str, float]] = []
-        size_filtered_labels: list[str] = []
-        for rect, label in zip(original_rects, original_labels):
-            rect_area = rect["width"] * rect["height"]
-            area_ratio = rect_area / total_image_area
-            if area_ratio < size_threshold:
-                size_filtered_rects.append(rect)
-                size_filtered_labels.append(label)
-
-        # 트리 구조 생성 (90% 이상 겹치면 포함 관계)
-        tree = _build_rect_tree(
-            size_filtered_rects, size_filtered_labels, overlap_threshold=0.9
+def _persist_result(
+    session, slot_id: int, stage_id: int, game_id: int, result: PuzzleResult
+) -> None:
+    slot = session.get(GameUploadSlot, slot_id)
+    stage = session.get(GameStage, stage_id)
+    game = session.get(Game, game_id)
+    if slot is None or stage is None or game is None:
+        logger.warning(
+            "persist skipped: slot/stage/game vanished (%s/%s/%s)",
+            slot_id,
+            stage_id,
+            game_id,
         )
+        return
 
-        # 트리 구조에서 부모-자식 관계가 있는 경우 더 큰 rect(부모) 제외
-        excluded_indices: set[int] = set()
-
-        def mark_parents_for_exclusion(node: dict) -> None:
-            """부모-자식 관계에서 부모(더 큰 rect)를 제외 목록에 추가"""
-            if node["children"]:
-                # 자식이 있으면 부모(자신) 제외
-                excluded_indices.add(node["index"])
-                # 자식들도 재귀적으로 확인
-                for child in node["children"]:
-                    mark_parents_for_exclusion(child)
-
-        # 모든 루트 노드에서 시작하여 부모 제외
-        for root_node in tree:
-            mark_parents_for_exclusion(root_node)
-
-        # 제외되지 않은 rect만 필터링
-        filtered_rects: list[dict[str, float]] = []
-        filtered_labels: list[str] = []
-        for i, (rect, label) in enumerate(
-            zip(size_filtered_rects, size_filtered_labels)
-        ):
-            if i not in excluded_indices:
-                filtered_rects.append(rect)
-                filtered_labels.append(label)
-
-        # 겹침 비율에 따라 처리 (50% 이상 삭제, 10-50% 축소, 10% 미만 유지)
-        processed_rects, processed_labels = _process_rects_with_overlap(
-            filtered_rects, filtered_labels
+    puzzle = stage.puzzle
+    if puzzle is None:
+        puzzle = Puzzle(
+            difficulty=game.difficulty or "normal",
+            original_image_url=result.original_key,
+            modified_image_url=result.modified_key,
+            width=result.width,
+            height=result.height,
         )
+        session.add(puzzle)
+        session.flush()
+        stage.puzzle_id = puzzle.id
+        stage.puzzle = puzzle
+    puzzle.original_image_url = result.original_key
+    puzzle.modified_image_url = result.modified_key
+    puzzle.width = result.width
+    puzzle.height = result.height
+    puzzle.is_completed = True
+    puzzle.differences = [
+        Difference(
+            index=int(d["index"]),
+            x=float(d["x"]),
+            y=float(d["y"]),
+            width=float(d["width"]),
+            height=float(d["height"]),
+            label=(d.get("label") or None),
+        )
+        for d in result.differences
+    ]
 
-        # 처리된 rect로 Difference 생성
-        detected: list[dict] = []
-        stored_differences: list[Difference] = []
-        index = 0
+    now = datetime.now()
+    stage.total_difference_count = len(result.differences)
+    stage.status = "playing"
+    stage.started_at = stage.started_at or now
 
-        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
-        session.execute(stmt)
-        for processed_rect, label in zip(processed_rects, processed_labels):
-            # 삭제된 rect는 건너뛰기
-            if processed_rect is None:
-                continue
+    slot.detected_objects = result.detected
+    slot.analysis_status = "completed"
+    slot.analysis_error = None
+    slot.last_analyzed_at = now
 
-            index += 1
-            x = processed_rect["x"]
-            y = processed_rect["y"]
-            width = processed_rect["width"]
-            height = processed_rect["height"]
-
-            # normalized rect 계산 (0-1000 스케일)
-            normalized_rect = [
-                int((y / image_height) * 1000),
-                int((x / image_width) * 1000),
-                int(((y + height) / image_height) * 1000),
-                int(((x + width) / image_width) * 1000),
-            ]
-
-            detected.append(
-                {
-                    "label": label,
-                    "rect": normalized_rect,
-                }
-            )
-
-            difference = Difference(
-                puzzle_id=puzzle.id,
-                index=index,
-                x=x,
-                y=y,
-                width=width,
-                height=height,
-                label=label,
-            )
-
-            session.add(difference)
-            session.flush()
-            stored_differences.append(difference)
-
-        if settings.debug:
-            debug_image = Image.open(io.BytesIO(normalized_image_bytes)).convert("RGB")
-            draw = ImageDraw.Draw(debug_image)
-            for diff in stored_differences:
-                x1, y1 = diff.x, diff.y
-                x2 = x1 + diff.width
-                y2 = y1 + diff.height
-                draw.rectangle(
-                    [(x1, y1), (x2, y2)],
-                    outline="red",
-                    width=3,
-                )
-                if diff.label:
-                    draw.text(
-                        (x1, max(0, y1 - 12)),
-                        diff.label,
-                        fill="red",
-                    )
-            debug_image.show(title=f"slot-{slot_id}-detections")
-
-        slot.detected_objects = detected
-        slot.analysis_status = "completed"
-        slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
-        if existing_stage:
-            existing_stage.total_difference_count = len(detected)
-            existing_stage.status = "waiting_puzzle"
-
-    return {
-        "slot_id": slot.id,
-        "detected": detected,
-        "image_bytes": normalized_image_bytes,
-    }
+    refresh_game_status(game)
 
 
-@celery_app.task(serializer='json')
-def edit_image_with_imagen3(payload: dict):
-    slot_id = payload["slot_id"]
-    detected = payload["detected"]
-    image_bytes = payload["image_bytes"]
+def _mark_failed(
+    session, slot_id: int, stage_id: int | None, game_id: int, message: str
+) -> None:
+    now = datetime.now()
+    slot = session.get(GameUploadSlot, slot_id)
+    if slot is not None:
+        slot.analysis_status = "failed"
+        slot.analysis_error = message[:500]
+        slot.last_analyzed_at = now
+    stage = session.get(GameStage, stage_id) if stage_id else None
+    if stage is not None:
+        stage.status = "failed"
+        stage.completed_at = now
+    game = session.get(Game, game_id)
+    if game is not None:
+        refresh_game_status(game)
+
+
+# --------------------------------------------------------------------------
+# Celery tasks
+# --------------------------------------------------------------------------
+@celery_app.task(name="app.worker.tasks.generate_puzzle_for_slot", ignore_result=True)
+def generate_puzzle_for_slot(slot_id: int) -> None:
+    started = time.perf_counter()
+    timings: dict[str, float] = {}
+
     with get_session() as session:
         slot = session.get(GameUploadSlot, slot_id)
         if slot is None or not slot.s3_object_key:
+            logger.warning("slot %s missing or has no object key; skipping", slot_id)
             return
-
-        s3_object_key = slot.s3_object_key
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
-        )
-
-        try:
-            with Image.open(io.BytesIO(image_bytes)) as img:
-                image_width, image_height = img.size
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Invalid image: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        detection_results: list[dict] = []
-        for item in detected:
-            rect = item.get("rect")
-            if not rect or len(rect) != 4:
-                continue
-            ymin, xmin, ymax, xmax = rect
-            pixel_box = {
-                "xmin": int(xmin / 1000 * image_width),
-                "ymin": int(ymin / 1000 * image_height),
-                "xmax": int(xmax / 1000 * image_width),
-                "ymax": int(ymax / 1000 * image_height),
-            }
-            detection_results.append(
-                {
-                    "name": item.get("label") or "object",
-                    "pixel_box": pixel_box,
-                    "prompt": item.get("prompt")
-                    or f"Modify {item.get('label') or 'object'} to create a difference.",
-                }
-            )
-
-        if not detection_results:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "No detection results for Imagen."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-        try:
-            temp_file.write(image_bytes)
-            temp_file.flush()
-            temp_file_path = temp_file.name
-        finally:
-            temp_file.close()
-
-        try:
-            imagen_bytes = modify_image_with_imagen(
-                temp_file_path,
-                detection_results,
-            )
-        except Exception as exc:
-            imagen_bytes = None
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Imagen edit failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-        finally:
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-
-        if not imagen_bytes:
-            return
-
-        output_key = s3_object_key.replace(".png", "-imagen.png")
-        s3_client.put_object(
-            Bucket=settings.aws_s3_bucket_name,
-            Key=output_key,
-            Body=imagen_bytes,
-            ContentType="image/png",
-        )
-
         game = session.get(Game, slot.game_id)
         if game is None:
             slot.analysis_status = "failed"
             slot.analysis_error = "Game not found."
             slot.last_analyzed_at = datetime.now()
             return
-
-        stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
-        if stage is None:
-            stage = GameStage(
-                game_id=game.id,
-                stage_number=slot.slot_number,
-                status="waiting_puzzle",
-                started_at=datetime.now(),
-            )
-            session.add(stage)
-            session.flush()
-            slot.stage_id = stage.id
-        if not stage or not stage.puzzle:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Puzzle not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        stage.puzzle.modified_image_url = output_key
-        stage.puzzle.is_completed = True
-        stage.status = "playing"
-        game.status = "playing"
-
-        slot.analysis_status = "completed"
+        stage = _ensure_stage(session, game, slot)
+        if stage.status == "waiting_upload":
+            stage.status = "waiting_puzzle"
+        slot.analysis_status = "processing"
         slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
+        object_key = slot.s3_object_key
+        game_id, stage_id = game.id, stage.id
+
+    try:
+        s3 = get_s3_client()
+        with _timed(timings, "download"):
+            body = s3.get_object(Bucket=settings.aws_s3_bucket_name, Key=object_key)
+            image_bytes = body["Body"].read()
+        result = generate_puzzle_images(
+            image_bytes,
+            s3=s3,
+            key_base=object_key.rsplit(".", 1)[0],
+            timings=timings,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface every failure to the user
+        logger.exception("puzzle generation failed slot=%s game=%s", slot_id, game_id)
+        with get_session() as session:
+            _mark_failed(
+                session, slot_id, stage_id, game_id, f"{type(exc).__name__}: {exc}"
+            )
+        return
+
+    with get_session() as session:
+        _persist_result(session, slot_id, stage_id, game_id, result)
+
+    timings["total"] = round(time.perf_counter() - started, 3)
+    logger.info(
+        "puzzle ready slot=%s game=%s stage=%s cache_hit=%s model=%s "
+        "differences=%d size=%dx%d timings=%s",
+        slot_id,
+        game_id,
+        stage_id,
+        result.cache_hit,
+        result.model,
+        len(result.differences),
+        result.width,
+        result.height,
+        timings,
+    )
 
 
-@celery_app.task(serializer='json')
+@celery_app.task(name="app.worker.tasks.run_imagen_pipeline", ignore_result=True)
 def run_imagen_pipeline(slot_id: int) -> None:
-    chain(
-        detect_objects_for_slot.s(slot_id),
-        edit_image_with_imagen3.s(),
-    ).delay()
+    """Backward-compatible alias for messages queued by pre-v2 API servers."""
+    generate_puzzle_for_slot(slot_id)

@@ -267,3 +267,8 @@
   font-size: 16px;
   margin: 0;
 }
+.waiting-content .waiting-hint {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #95a5a6;
+}

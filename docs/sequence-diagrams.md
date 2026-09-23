@@ -16,48 +16,40 @@ sequenceDiagram
     U->>F: 이미지 업로드 페이지 접속
     U->>F: 이미지 파일 선택 (최대 3장)
     U->>F: "게임 시작" 버튼 클릭
-    
+
     F->>N: POST /api/v1/games
     N->>B: 게임 생성 요청
-    B->>DB: Game 레코드 생성
-    B->>DB: GameUploadSlot 생성 (이미지 개수만큼)
+    B->>DB: Game, GameStage, GameUploadSlot 생성 (이미지 개수만큼)
     B->>S3: Presigned URL 생성
-    B-->>N: {game_id, upload_slots[]}
-    N-->>F: 게임 생성 응답
-    
-    loop 각 이미지별
-        F->>S3: PUT presigned_url (이미지 업로드)
-        S3-->>F: 업로드 완료
+    B-->>F: {game_id, upload_slots[]}
+
+    par 이미지마다 병렬
+        F->>F: createImageBitmap → 1600px JPEG로 축소 (EXIF 반영)
+        F->>S3: PUT presigned_url (수백 KB)
         F->>N: POST /api/v1/games/{game_id}/uploads/complete
         N->>B: 업로드 완료 알림
-        B->>DB: GameUploadSlot.uploaded = true
-        B->>R: Celery Task 전송 (run_imagen_pipeline)
-        B-->>N: 업로드 완료 응답
-        N-->>F: 응답
+        B->>DB: slot.uploaded=true, stage.status=waiting_puzzle
+        B->>R: Celery Task 전송 (generate_puzzle_for_slot)
+        B-->>F: 응답
     end
-    
-    C->>R: Task 수신 (detect_objects_for_slot)
-    C->>S3: 이미지 다운로드
-    C->>C: Vision API로 객체 탐지
-    C->>DB: detected_objects 저장
-    C->>R: 다음 Task 전송 (edit_image_with_imagen3)
-    
-    C->>R: Task 수신 (edit_image_with_imagen3)
-    C->>C: Imagen으로 이미지 수정
-    C->>S3: 수정된 이미지 업로드
-    C->>DB: Puzzle 생성, GameStage 생성
-    C->>DB: Game.status = "playing" 업데이트
-    
-    loop 1초마다 폴링
+    opt S3 업로드 실패한 슬롯
+        F->>B: POST /uploads/failed {slot}
+        B->>DB: stage.status=failed (해당 스테이지 건너뜀)
+    end
+
+    C->>R: Task 수신 (generate_puzzle_for_slot)
+    Note over C: 퍼즐 생성 파이프라인 (3번 다이어그램)
+    C->>DB: Puzzle/Difference 저장, stage=playing, game=playing
+
+    loop 1.5초마다 폴링 (최대 4분)
         F->>N: GET /api/v1/games/{game_id}
         N->>B: 게임 상태 조회
-        B->>DB: Game 조회
-        B-->>N: {status, puzzle}
-        N-->>F: 게임 상태 응답
+        B-->>F: {status, puzzle, ready_stages, failed_stages}
+        F->>U: "AI가 퍼즐을 만들고 있습니다… 1/3 완료"
     end
-    
-    F->>F: status="playing" 감지
-    F->>U: 게임 페이지로 이동
+
+    F->>F: status="playing" && puzzle 존재 감지
+    F->>U: 게임 페이지로 이동 (남은 스테이지는 플레이 중 계속 생성)
 ```
 
 ## 2. 게임 플레이 플로우
@@ -143,44 +135,39 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant S3 as AWS S3
     participant V as Vision API
-    participant I as Imagen API
+    participant G as Gemini Image Model
 
-    Note over C: Task 1: detect_objects_for_slot(slot_id)
-    
-    C->>DB: GameUploadSlot 조회
-    DB-->>C: {s3_object_key}
-    
-    C->>S3: GetObject (원본 이미지)
-    S3-->>C: image_bytes
-    
-    C->>V: Vision API<br/>객체 탐지 요청
-    Note over V: 5개 객체 선택<br/>box_2d 좌표 반환
-    V-->>C: detected_objects[]
-    
-    C->>DB: GameUploadSlot.detected_objects 저장
-    C->>DB: analysis_status = "completed"
-    
-    C->>C: Chain 다음 Task 호출
-    
-    Note over C: Task 2: edit_image_with_imagen3(payload)
-    
-    C->>C: 탐지된 객체로 마스크 생성
-    C->>C: modification_idea로 프롬프트 생성
-    
-    C->>I: Imagen 3<br/>이미지 편집 요청
-    Note over I: 마스크 영역만 수정<br/>나머지는 원본 유지
-    I-->>C: modified_image_bytes
-    
-    C->>S3: PutObject (수정된 이미지)
-    S3-->>C: modified_s3_key
-    
-    C->>DB: Puzzle 생성
-    C->>DB: Difference 생성 (탐지된 객체별)
-    C->>DB: GameStage 생성
-    
-    alt 모든 슬롯 처리 완료
-        C->>DB: Game.status = "playing" 업데이트
+    Note over C: Task: generate_puzzle_for_slot(slot_id) — 슬롯당 태스크 1개
+
+    C->>DB: GameUploadSlot/Game/GameStage 조회, slot=processing
+    C->>S3: GetObject (업로드본)
+    C->>C: 정규화: EXIF 보정 → RGB → 긴 변 1024px → 모델 지원 비율로 중앙 크롭
+    C->>C: sha256(pixels)
+
+    C->>S3: GetObject puzzle-cache/v1/{sha}/manifest.json
+    alt 캐시 히트 (같은 사진을 전에 처리함)
+        C->>DB: Puzzle(캐시 키), Difference 저장, stage=playing
+    else 캐시 미스
+        C->>V: object_localization(1024px JPEG)
+        V-->>C: 객체 박스[]
+        C->>C: 영역 선택: 40%↑/0.3%↓ 제외, 포함관계 부모 제외, 겹침 처리, 최대 5개
+        C->>C: 패딩 → feather 마스크, 번호 박스 힌트 이미지
+        C->>G: generate_content(원본 PNG + 힌트 PNG + 편집 지시, image_config 1K)
+        Note over G: 기본 gemini-3.1-flash-lite-image<br/>실패 시 gemini-3.1-flash-image로 폴백
+        G-->>C: 편집된 이미지 (1K)
+        C->>C: 원본 크기로 리사이즈 → 마스크 합성 (마스크 밖 = 원본 픽셀)
+        C->>C: 영역별 평균 픽셀 차이 측정 → 바뀌지 않은 영역 제외
+        opt 바뀐 영역 0개
+            C->>G: 더 강한 프롬프트로 1회 재시도
+        end
+        C->>C: 검증된 영역만으로 재합성 → original.jpg / modified.jpg
+        C->>S3: PutObject ×3 병렬 (original, modified, manifest)
+        C->>DB: Puzzle 생성/갱신, Difference(검증된 것만), stage=playing
     end
+
+    C->>DB: Game 상태 갱신 (첫 미완료 스테이지가 playing이면 game=playing)
+    Note over C: 실패 시: slot=failed, stage=failed, 모든 스테이지 실패면 game=failed
+    Note over C: 로그: puzzle ready … timings={download, normalize, detect, edit_1, composite, upload, total}
 ```
 
 ## 4. 데이터베이스 ER Diagram
@@ -272,12 +259,12 @@ graph TB
     end
 
     subgraph "AWS S3"
-        S3[S3 Bucket<br/>hidden-catch-image]
+        S3[S3 Bucket<br/>uploads/ + puzzle-cache/]
     end
 
     subgraph "Google Cloud"
         Vision[Vision API<br/>Object Detection]
-        Imagen[Imagen API<br/>Image Edit]
+        Imagen[Gemini Image Model<br/>gemini-3.1-flash-lite-image]
     end
 
     Browser -->|HTTP| Nginx

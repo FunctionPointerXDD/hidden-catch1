@@ -30,12 +30,16 @@ function GamePage({ onNavigate, sessionId }) {
       if (!img || !puzzleData) return;
 
       const rect = img.getBoundingClientRect();
-      const imgWidth = img.naturalWidth;
-      const imgHeight = img.naturalHeight;
+      const naturalWidth = img.naturalWidth;
+      const naturalHeight = img.naturalHeight;
+      // 정답/클릭 좌표는 서버가 알려준 퍼즐 이미지 크기(px) 기준이다. 화면의
+      // <img> 해상도가 달라도(모델 출력 크기, 캐시 등) 좌표계가 어긋나지 않는다.
+      const imgWidth = puzzleData.width || naturalWidth;
+      const imgHeight = puzzleData.height || naturalHeight;
       const containerWidth = rect.width;
       const containerHeight = rect.height;
 
-      const imgRatio = imgWidth / imgHeight;
+      const imgRatio = naturalWidth / naturalHeight;
       const containerRatio = containerWidth / containerHeight;
 
       let displayWidth, displayHeight, offsetX, offsetY;
@@ -104,7 +108,6 @@ function GamePage({ onNavigate, sessionId }) {
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     console.log('[loadGameData] 호출됨, gameId:', gameId);
-    console.trace('[loadGameData] 호출 스택:'); // 호출 스택 출력
     try {
       const response = await fetch(`/api/v1/games/${gameId}`);
       
@@ -229,15 +232,17 @@ function GamePage({ onNavigate, sessionId }) {
       return;
     }
     
-    // 실제 이미지 좌표로 변환
-    const imageX = Math.round((clickX - offsetX) * (imgWidth / displayWidth));
-    const imageY = Math.round((clickY - offsetY) * (imgHeight / displayHeight));
+    // 퍼즐 좌표계(서버가 알려준 width/height)로 변환
+    const coordWidth = puzzleData.width || imgWidth;
+    const coordHeight = puzzleData.height || imgHeight;
+    const imageX = Math.round((clickX - offsetX) * (coordWidth / displayWidth));
+    const imageY = Math.round((clickY - offsetY) * (coordHeight / displayHeight));
 
     console.log(`클릭 좌표: (${imageX}, ${imageY}), 이미지 크기: ${imgWidth}x${imgHeight}`);
 
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -1,253 +1,223 @@
-import io
-import json
+"""External AI calls: object detection (Cloud Vision) and image editing (Gemini).
+
+Clients are created lazily once per worker process. The old pipeline built a
+new Vision/boto3/genai client for every task, paying credential loading and
+channel setup (hundreds of ms) each time.
+"""
+
+from __future__ import annotations
+
+import base64
+import logging
 import os
-from typing import Sequence, cast
+import threading
+from typing import Any
 
 from google import genai
+from google.cloud import vision
 from google.genai import types
-from PIL import Image as PILImage
-from PIL import ImageDraw, ImageFilter
-from pydantic import BaseModel
-from vertexai.preview.vision_models import Image, ImageGenerationModel
 
 from app.core.config import settings
+from app.worker.imaging import position_hint
 
-# GCP 서비스 계정 키 설정
+logger = logging.getLogger(__name__)
+
 if settings.google_application_credentials:
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
-
-
-class DetectedObjects(BaseModel):
-    object_name: str
-    box_2d: list[float]
-    type: str
-    modification_idea: str
-
-
-def find_game_objects_normalized(image_bytes: bytes):
-    with PILImage.open(io.BytesIO(image_bytes)) as img:
-        img_width, img_height = img.size
-
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-    client = genai.Client(
-        vertexai=True,
-        project=settings.gcp_project_id,
-        location="us-central1",
+    os.environ.setdefault(
+        "GOOGLE_APPLICATION_CREDENTIALS", settings.google_application_credentials
     )
 
-    prompt = """
-    You are an expert Game Level Designer for a "Spot the Difference" puzzle game.
-    Your task is to analyze the image and identify 5 distinct objects to modify.
-     **Selection Criteria:**
-     1. Select objects that are clearly visible and distinct from the background.
-     2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
-     3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
-     4. Ensure that the `box_2d` regions of the selected objects overlap as little as possible.
-     5. If an overlap is unavoidable, prioritize modifying the object with the larger area.
-    **Output Requirements:**
-    1. Provide the output STRICTLY in valid JSON format.
-    2. Do NOT use Markdown formatting.
-    3. The `box_2d` coordinates must be in the format `[ymin, xmin, ymax, xmax]`.
-    4. **IMPORTANT:** Values must be **normalized floats between 0.0 and 1.0** (relative to the image size).
-    **JSON Example (Follow this pattern):**
-    [
-        {
-            "object_name": "Man's Shirt",
-            "box_2d": [0.45, 0.30, 0.60, 0.50],
-            "type": "Color Change",
-            "modification_idea": "Change the shirt color to bright yellow"
-        }
-    ]
+_lock = threading.Lock()
+_vision_client: Any = None
+_genai_client: Any = None
+
+
+def get_vision_client() -> Any:
+    global _vision_client
+    with _lock:
+        if _vision_client is None:
+            _vision_client = vision.ImageAnnotatorClient()
+        return _vision_client
+
+
+def get_genai_client() -> Any:
+    global _genai_client
+    with _lock:
+        if _genai_client is None:
+            if settings.google_api_key:
+                _genai_client = genai.Client(api_key=settings.google_api_key)
+            else:
+                _genai_client = genai.Client(
+                    vertexai=True,
+                    project=settings.gcp_project_id or None,
+                    location=settings.gcp_location,
+                )
+        return _genai_client
+
+
+class ImageEditError(RuntimeError):
+    """Raised when no configured image model returned an edited image."""
+
+
+# --------------------------------------------------------------------------
+# Object detection
+# --------------------------------------------------------------------------
+def detect_objects(
+    image_bytes: bytes, image_width: int, image_height: int, client: Any = None
+) -> list[dict[str, Any]]:
+    """Run Cloud Vision object localization and return pixel boxes.
+
+    ``image_bytes`` should be the *normalized* (<= ~1024px) image: Vision does
+    not get more accurate above ~640x480 but every extra megabyte costs
+    upload time.
     """
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=[image_part, prompt],
-        config=types.GenerateContentConfigDict(
-            response_mime_type="application/json",
-            response_json_schema=DetectedObjects.model_json_schema(),
-        ),
-    )
-
-    if response is None:
-        return
-
-    if response.text is None:
-        return
-    try:
-        raw_data = json.loads(response.text)
-        if isinstance(raw_data, dict):
-            result_items = [raw_data]
-        elif isinstance(raw_data, list):
-            result_items = raw_data
-        else:
-            raise ValueError("Gemini returned unsupported JSON structure.")
-
-        final_result = []
-        for item in result_items:
-            norm_box = item["box_2d"]
-
-            ymin, xmin, ymax, xmax = norm_box
-
-            pixel_box = {
-                "ymin": int(ymin * img_height),
-                "xmin": int(xmin * img_width),
-                "ymax": int(ymax * img_height),
-                "xmax": int(xmax * img_width),
-            }
-
-            processed_item = {
-                "name": item["object_name"],
-                "prompt": item["modification_idea"],
-                "normalized": norm_box,
-                "pixel_box": pixel_box,
-            }
-            final_result.append(processed_item)
-
-        return final_result
-    except Exception as e:
-        print(e)
-        return []
-
-
-def _build_mask_from_detections(
-    detection_results: Sequence[dict],
-    canvas_size: tuple[int, int],
-):
-    mask_image = PILImage.new("L", canvas_size, 0)
-    draw = ImageDraw.Draw(mask_image)
-    combined_prompt_list: list[str] = []
-
-    for item in detection_results:
-        box = item.get("pixel_box")
-        if not box:
+    client = client or get_vision_client()
+    response = client.object_localization(image=vision.Image(content=image_bytes))
+    boxes: list[dict[str, Any]] = []
+    for annotation in response.localized_object_annotations:
+        vertices = annotation.bounding_poly.normalized_vertices
+        if not vertices:
             continue
-        prompt_idea = item.get("prompt") or f"Modify {item.get('name', 'object')}."
-        draw.rectangle([box["xmin"], box["ymin"], box["xmax"], box["ymax"]], fill=255)
-        combined_prompt_list.append(prompt_idea)
-
-    if not combined_prompt_list:
-        raise ValueError("No valid detection prompts to build Imagen request.")
-
-    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=5))
-    final_prompt = " ".join(combined_prompt_list)
-    return mask_image, final_prompt
-
-
-def _initialize_imagen_client():
-    return genai.Client(
-        vertexai=True,
-        project=settings.gcp_project_id,
-        location="us-central1",
-    )
-
-
-def modify_image_with_imagen(original_image_path, detection_results):
-    if not detection_results:
-        raise ValueError("detection_results must not be empty.")
-
-    with PILImage.open(original_image_path) as opened:
-        pil_original = opened.convert("RGB")
-        width, height = pil_original.size
-
-    # 마스크 생성 함수 호출
-    mask_image, final_prompt = _build_mask_from_detections(
-        detection_results,
-        (width, height),
-    )
-
-    # ============================================================
-    # [핵심 수정] 마스크 강제 이진화 처리 (오류 해결 파트)
-    # 1. 흑백(L) 모드로 변환
-    # 2. 128 기준으로 완전한 검은색(0)과 흰색(255)으로 나눔
-    # 3. 1-bit 픽셀(mode='1')로 변환하지 말고 'L'이나 'RGB' 유지 권장 (호환성 위해)
-    # ============================================================
-    mask_image = mask_image.convert("L").point(lambda x: 255 if x > 100 else 0)
-
-    original_bytes_io = io.BytesIO()
-    mask_bytes_io = io.BytesIO()
-
-    pil_original.save(original_bytes_io, format="PNG")
-    mask_image.save(mask_bytes_io, format="PNG")
-
-    original_bytes = original_bytes_io.getvalue()
-    mask_bytes = mask_bytes_io.getvalue()
-
-    # Reference 설정
-    raw_ref = types.RawReferenceImage(
-        reference_id=1,
-        reference_image=types.Image(image_bytes=original_bytes, mime_type="image/png"),
-    )
-
-    mask_ref = types.MaskReferenceImage(
-        reference_id=2,
-        reference_image=types.Image(image_bytes=mask_bytes, mime_type="image/png"),
-        config=types.MaskReferenceConfig(
-            mask_mode=types.MaskReferenceMode.MASK_MODE_USER_PROVIDED,
-            mask_dilation=0,  # 영역을 살짝(5%) 넓혀 경계선 어색함 방지
-        ),
-    )
-
-    client = _initialize_imagen_client()
-
-    try:
-        response = client.models.edit_image(
-            model="imagen-3.0-capability-001",
-            prompt=final_prompt,
-            reference_images=[raw_ref, mask_ref],
-            config=types.EditImageConfig(
-                edit_mode=types.EditMode.EDIT_MODE_INPAINT_INSERTION,
-                number_of_images=1,
-                output_mime_type="image/png",
-            ),
+        xs = [min(1.0, max(0.0, v.x)) for v in vertices]
+        ys = [min(1.0, max(0.0, v.y)) for v in vertices]
+        x0, x1 = min(xs) * image_width, max(xs) * image_width
+        y0, y1 = min(ys) * image_height, max(ys) * image_height
+        boxes.append(
+            {
+                "label": annotation.name,
+                "score": float(annotation.score),
+                "x": x0,
+                "y": y0,
+                "width": x1 - x0,
+                "height": y1 - y0,
+            }
         )
-    except Exception as e:
-        print(f"Imagen API Error Detail: {e}")
-        return None
+    return boxes
 
-    if response.generated_images:
-        return response.generated_images[0].image.image_bytes
 
+# --------------------------------------------------------------------------
+# Image editing
+# --------------------------------------------------------------------------
+EDIT_IDEAS: tuple[str, ...] = (
+    "change its color to a clearly different, natural-looking color",
+    "remove it completely and fill the area with matching background",
+    "replace it with a different object of about the same size",
+    "change its texture, pattern or material so it looks clearly different",
+)
+
+
+def edit_idea_for(index: int, label: str) -> str:
+    """Deterministic per-region instruction so one puzzle mixes edit types."""
+    return EDIT_IDEAS[index % len(EDIT_IDEAS)]
+
+
+def build_edit_prompt(
+    regions: list[dict[str, Any]],
+    image_width: int,
+    image_height: int,
+    *,
+    bold: bool = False,
+    with_hint_image: bool = True,
+) -> str:
+    lines = [
+        'You are editing a photo for a "spot the difference" game.',
+        f"Make exactly {len(regions)} clearly visible changes, one in each region "
+        "listed below, and keep EVERYTHING else pixel-identical: same framing, "
+        "same lighting, same colors, same background, same image size.",
+    ]
+    if with_hint_image:
+        lines.append(
+            "The second image is the same photo with numbered red boxes that only "
+            "show where each region is. Never draw boxes or numbers in your output."
+        )
+    lines.append("Regions:")
+    for number, region in enumerate(regions, start=1):
+        label = region.get("label") or "object"
+        where = position_hint(region, image_width, image_height)
+        idea = edit_idea_for(number - 1, label)
+        lines.append(f"{number}. the {label} at the {where}: {idea}.")
+    strength = (
+        "Each change must be BOLD and impossible to miss even in a small thumbnail."
+        if bold
+        else "Each change must be obvious at a glance yet photorealistic and "
+        "blended naturally."
+    )
+    lines.append(
+        f"Rules: {strength} Do not add text, borders or watermarks. Do not change "
+        "anything outside the listed regions."
+    )
+    return "\n".join(lines)
+
+
+def extract_image_bytes(response: Any) -> bytes | None:
+    """Return the first inline image from a generate_content response."""
+    for candidate in getattr(response, "candidates", None) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            blob = getattr(part, "inline_data", None)
+            data = getattr(blob, "data", None) if blob is not None else None
+            if not data:
+                continue
+            if isinstance(data, str):
+                data = base64.b64decode(data)
+            return bytes(data)
     return None
 
 
-def modify_image_with_imagen2(original_image_path, detection_results):
-    pil_original = PILImage.open(original_image_path)
-    width, height = pil_original.size
+def edit_image(
+    original_png: bytes,
+    prompt: str,
+    *,
+    hint_png: bytes | None = None,
+    aspect_ratio: str | None = None,
+    image_size: str | None = None,
+    models: list[str] | None = None,
+    client: Any = None,
+) -> tuple[bytes, str]:
+    """Ask a Gemini image model for the edited picture.
 
-    mask_image = PILImage.new("L", (width, height), 0)
-    draw = ImageDraw.Draw(mask_image)
+    Tries ``models`` in order (primary first, then fallbacks) so a retired or
+    regionally unavailable model degrades gracefully instead of failing the
+    puzzle. Returns ``(image_bytes, model_name)``.
+    """
+    client = client or get_genai_client()
+    models = models or [settings.image_edit_model, *settings.image_edit_fallback_models]
 
-    combined_prompt_list = []
+    parts: list[Any] = [types.Part.from_bytes(data=original_png, mime_type="image/png")]
+    if hint_png:
+        parts.append(types.Part.from_bytes(data=hint_png, mime_type="image/png"))
+    parts.append(types.Part.from_text(text=prompt))
 
-    for item in detection_results:
-        box = item["pixel_box"]
-        prompt_idea = item["prompt"]
-
-        draw.rectangle([box["xmin"], box["ymin"], box["xmax"], box["ymax"]], fill=255)
-
-        combined_prompt_list.append(prompt_idea)
-
-    mask_image = mask_image.filter(ImageFilter.GaussianBlur(radius=5))
-
-    final_prompt = " ".join(combined_prompt_list)
-
-    original_bytes = io.BytesIO()
-    pil_original.save(original_bytes, format="PNG")
-    vertex_original = Image(original_bytes.getvalue())
-
-    mask_bytes = io.BytesIO()
-    mask_image.save(mask_bytes, format="PNG")
-    vertex_mask = Image(mask_bytes.getvalue())
-
-    generation_model = ImageGenerationModel.from_pretrained("imagegeneration@006")
-    response = generation_model.edit_image(
-        base_image=vertex_original,
-        mask=vertex_mask,
-        prompt=final_prompt,
-        guidance_scale=60,  # 프롬프트를 얼마나 따를지 (높을수록 프롬프트 충실)
-        mask_mode="semantic",  # 마스크 안쪽을 수정
+    image_config = (
+        types.ImageConfig(aspect_ratio=aspect_ratio, image_size=image_size)
+        if (aspect_ratio or image_size)
+        else None
     )
-
-    if response.images:
-        return response.images[0]._image_bytes
+    errors: list[str] = []
+    for model in models:
+        configs = [image_config, None] if image_config is not None else [None]
+        for config_variant in configs:
+            config = types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=config_variant,
+            )
+            try:
+                response = client.models.generate_content(
+                    model=model, contents=parts, config=config
+                )
+            except Exception as exc:  # noqa: BLE001 - we want to fall through
+                errors.append(f"{model}: {exc}")
+                logger.warning(
+                    "image edit failed model=%s config=%s: %s",
+                    model,
+                    "image_config" if config_variant else "default",
+                    exc,
+                )
+                continue
+            data = extract_image_bytes(response)
+            if data:
+                return data, model
+            errors.append(f"{model}: response contained no image")
+            logger.warning("image edit returned no image model=%s", model)
+            break  # the model answered; a different config will not help
+    raise ImageEditError("; ".join(errors) or "no image model configured")

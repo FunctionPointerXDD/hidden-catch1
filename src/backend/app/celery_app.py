@@ -1,19 +1,10 @@
-from celery import Celery
-from app.core.config import settings
+"""Entry point kept for ``celery -A app.celery_app worker``.
 
-celery_app = Celery(
-    "hidden_catch",
-    broker=settings.celery_broker_url,
-    backend=settings.celery_result_backend,
-)
+Re-exports the single Celery application defined in ``app.worker.celery_app``
+so that the producer (FastAPI) and the consumer (worker) share one instance
+and one configuration.
+"""
 
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="Asia/Seoul",
-    enable_utc=True,
-)
+from app.worker.celery_app import celery_app
 
-# Auto-discover tasks from app.worker.tasks module
-celery_app.autodiscover_tasks(["app.worker"])
+__all__ = ["celery_app"]

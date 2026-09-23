@@ -12,7 +12,9 @@ FastAPI 기반으로 구현된 HiddenCatch 서비스의 백엔드.
 - **Celery** - 비동기 작업 큐
 - **Redis** - Celery 브로커 및 결과 백엔드
 - **AWS S3** - 이미지 파일 저장
-- **Google Cloud Vision API** - 이미지 분석 및 차이점 탐지
+- **Google Cloud Vision API** - 객체 탐지
+- **Google Gemini 이미지 모델 (google-genai)** - 이미지 편집 (Vertex AI global 엔드포인트)
+- **Pillow** - 정규화·마스크 합성·차이 검증
 - **Ruff** - 포맷터 및 린터
 
 ## 프로젝트 구조
@@ -43,10 +45,13 @@ src/backend
 │   ├── services/
 │   │   └── game_service.py       # 게임 비즈니스 로직
 │   ├── worker/
-│   │   ├── celery_app.py         # Celery 앱 설정
-│   │   ├── tasks.py              # Celery 작업 정의
-│   │   └── detect.py             # 이미지 차이점 탐지 로직
+│   │   ├── celery_app.py         # Celery 앱 설정 (단일 인스턴스)
+│   │   ├── tasks.py              # generate_puzzle_for_slot 파이프라인
+│   │   ├── imaging.py            # 정규화·마스크·합성·차이 측정 (Pillow)
+│   │   ├── geometry.py           # 탐지 박스 → 정답 영역 선택
+│   │   └── detect.py             # Vision 탐지, Gemini 편집(모델 폴백), 프롬프트
 │   └── main.py                   # FastAPI 앱 진입점
+├── tests/                        # 오프라인 테스트 (FakeS3, 가짜 Vision/Gemini, SQLite)
 ├── migrations/                   # Alembic 마이그레이션 파일
 ├── pyproject.toml               # 프로젝트 설정 및 의존성
 └── README.md
@@ -93,6 +98,16 @@ CELERY_RESULT_BACKEND=redis://localhost:6379/0
 
 # GCP 설정
 GCP_PROJECT_ID=your_project_id
+GCP_LOCATION=global                      # Gemini 이미지 모델은 global 엔드포인트
+GOOGLE_APPLICATION_CREDENTIALS=/path/key.json
+# GOOGLE_API_KEY=...                     # 설정 시 편집 단계만 Gemini Developer API 사용
+
+# 퍼즐 생성 파이프라인 (전체 목록: ../../docs/puzzle-pipeline-v2.md)
+IMAGE_EDIT_MODEL=gemini-3.1-flash-lite-image
+IMAGE_EDIT_FALLBACK_MODELS=["gemini-3.1-flash-image"]
+PUZZLE_MAX_EDGE=1024
+PUZZLE_MIN_CHANGE_SCORE=10
+PUZZLE_CACHE_ENABLED=true
 ```
 
 ### 3. 데이터베이스 설정
@@ -135,8 +150,16 @@ fastapi run
 # Redis
 redis-server
 
-# Celery
-celery -A app.worker.celery_app worker --loglevel=info
+# Celery (I/O 대기 중심이므로 vCPU보다 많은 동시성이 유리)
+celery -A app.celery_app worker --loglevel=info --concurrency=3
+```
+
+### 5. 테스트
+
+```bash
+uv sync            # dev 그룹(pytest, ruff) 포함
+pytest -q          # 외부 API 없이 파이프라인·상태 전이 테스트 34개
+ruff check app tests
 ```
 
 ## API 엔드포인트
@@ -145,8 +168,9 @@ celery -A app.worker.celery_app worker --loglevel=info
 
 - `POST /api/v1/games` - 게임 생성
 - `GET /api/v1/games/{game_id}` - 게임 상세 정보 조회
-- `POST /api/v1/games/{game_id}/uploads/complete` - 업로드 완료 처리
-- `GET /api/v1/games/{game_id}/uploads` - 업로드 상태 조회
+- `POST /api/v1/games/{game_id}/uploads/complete` - 업로드 완료 처리 (퍼즐 생성 태스크 시작)
+- `POST /api/v1/games/{game_id}/uploads/failed` - 브라우저 업로드 실패 슬롯 건너뛰기
+- `GET /api/v1/games/{game_id}/uploads` - 업로드/분석 상태 조회
 - `POST /api/v1/games/{game_id}/stages/{stage_number}/check` - 정답 확인
 - `POST /api/v1/games/{game_id}/stages/{stage_number}/complete` - 스테이지 완료
 - `POST /api/v1/games/{game_id}/finish` - 게임 종료
@@ -173,5 +197,6 @@ celery -A app.worker.celery_app worker --loglevel=info
 
 - [ ] 인증/인가 추가
 - [ ] 에러 핸들링 개선
-- [ ] 로깅 시스템 구축
-- [ ] 단위 테스트 및 통합 테스트 작성
+- [ ] 로깅 시스템 구축 (워커는 단계별 timings 로그 제공)
+- [x] 단위 테스트 및 통합 테스트 작성 (`tests/`, 외부 API 없이 실행)
+- [ ] 폴링 → SSE 전환, 사전 생성 퍼즐 풀 (docs/ai-pipeline-optimization-research.md §7)
